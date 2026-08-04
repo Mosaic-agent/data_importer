@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 
 # Repo root is one level up from this script
 REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT))
+sys.path.insert(0, str(REPO_ROOT.parent))  # parent dir contains the data_importer package
 
 from data_importer.fetchers.mirae_inav_fetcher import MIRAE_SYMBOLS, fetch_inav_mirae
 from data_importer.fetchers.motilal_inav_fetcher import MOTILAL_SYMBOLS, fetch_inav_motilal
