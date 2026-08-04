@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  integration-tests:
+    name: Integration Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Add repo parent to PYTHONPATH
+        # Makes `import data_importer` resolve to this repo root.
+        # conftest.py then creates the src.data_importer alias automatically.
+        run: echo "PYTHONPATH=$(pwd)/.." >> $GITHUB_ENV
+
+      - name: Run integration tests
+        env:
+          ALLOW_LOCAL_RUN: "1"
+          CLICKHOUSE_HOST: "localhost"
+          CLICKHOUSE_PORT: "8123"
+          OPENAI_API_KEY: "stub-not-used-in-tests"
+          LLM_PROVIDER: "openai"
+          LLM_MODEL: "gpt-4o"
+        run: python -m pytest tests/ -v --tb=short
+

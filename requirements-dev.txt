@@ -1,0 +1,18 @@
+# Runtime dependencies (minimal subset required for import-time resolution)
+pandas>=2.2.0
+requests>=2.32.0
+pydantic>=2.7.0
+pydantic-settings>=2.3.0
+yfinance>=0.2.40
+clickhouse-connect>=0.7.0
+nselib>=2.5.0
+beautifulsoup4>=4.12.0
+feedparser>=6.0.0
+
+# LangChain tools (required by tool_fetchers/)
+langchain>=0.3.0
+langchain-core>=0.3.0
+
+# Test runner
+pytest>=8.0.0
+pytest-mock>=3.14.0
