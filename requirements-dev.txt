@@ -8,6 +8,9 @@ clickhouse-connect>=0.7.0
 nselib>=2.5.0
 beautifulsoup4>=4.12.0
 feedparser>=6.0.0
+rich>=13.0.0
+gnews>=0.3.0
+newsapi-python>=0.2.7
 
 # LangChain tools (required by tool_fetchers/)
 langchain>=0.3.0
