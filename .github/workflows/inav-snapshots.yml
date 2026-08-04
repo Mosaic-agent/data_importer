@@ -1,0 +1,49 @@
+name: inav-snapshots
+
+# Capture live iNAV snapshots every 5 min during NSE market hours and commit
+# them to market_data/inav/{SYMBOL}/{YYYY}/{MM}/{DD}.csv in this repo.
+# NSE hours: 09:15-15:30 IST = 03:45-10:00 UTC, Mon-Fri.
+
+on:
+  schedule:
+    # Every 5 min from 03:00-10:59 UTC, Mon-Fri.
+    # Script re-checks IST boundary and skips out-of-hours ticks.
+    - cron: "*/5 3-10 * * 1-5"
+  workflow_dispatch: {}
+
+concurrency:
+  group: inav-snapshots
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime deps
+        run: pip install httpx pandas pydantic pydantic-settings pytz
+
+      - name: Capture iNAV snapshots
+        run: python scripts/capture_inav_snapshots.py
+
+      - name: Commit new snapshots
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add market_data/inav/
+          git diff --cached --quiet && echo "[skip] no new data" && exit 0
+          git commit -m "data: iNAV snapshot $(date -u '+%Y-%m-%d %H:%M UTC')"
+          git push
