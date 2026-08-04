@@ -28,22 +28,22 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install runtime deps
-        run: pip install httpx pytz -r requirements-dev.txt
+      - name: Build capture image
+        run: docker build -t inav-capture .
 
       - name: Capture iNAV snapshots
-        run: python scripts/capture_inav_snapshots.py
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -w /workspace \
+            inav-capture \
+            python scripts/capture_inav_snapshots.py
 
       - name: Commit new snapshots
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add market_data/inav/
+          git add market_data/inav/ 2>/dev/null || true
           git diff --cached --quiet && echo "[skip] no new data" && exit 0
           git commit -m "data: iNAV snapshot $(date -u '+%Y-%m-%d %H:%M UTC')"
           git push

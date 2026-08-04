@@ -19,7 +19,10 @@ from zoneinfo import ZoneInfo
 
 # Repo root is one level up from this script
 REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT.parent))  # parent dir contains the data_importer package
+# In Docker: PYTHONPATH=/opt/pkgs handles resolution.
+# In the main repo: add parent so `import data_importer` finds src/../data_importer.
+if not any("data_importer" in p for p in sys.path):
+    sys.path.insert(0, str(REPO_ROOT.parent))
 
 # Bridge src.data_importer.* → data_importer.* (fetchers use the src.* namespace)
 import types as _types
