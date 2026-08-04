@@ -34,7 +34,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install runtime deps
-        run: pip install httpx pandas pydantic pydantic-settings pytz
+        run: pip install httpx pytz -r requirements-dev.txt
 
       - name: Capture iNAV snapshots
         run: python scripts/capture_inav_snapshots.py
