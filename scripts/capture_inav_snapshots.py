@@ -21,6 +21,19 @@ from zoneinfo import ZoneInfo
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT.parent))  # parent dir contains the data_importer package
 
+# Bridge src.data_importer.* → data_importer.* (fetchers use the src.* namespace)
+import types as _types
+if "src" not in sys.modules:
+    _src = _types.ModuleType("src")
+    _src.__path__ = []
+    _src.__package__ = "src"
+    sys.modules["src"] = _src
+import data_importer as _di_pkg
+sys.modules.setdefault("src.data_importer", _di_pkg)
+for _mod_name in list(sys.modules):
+    if _mod_name.startswith("data_importer."):
+        sys.modules.setdefault("src." + _mod_name, sys.modules[_mod_name])
+
 from data_importer.fetchers.mirae_inav_fetcher import MIRAE_SYMBOLS, fetch_inav_mirae
 from data_importer.fetchers.motilal_inav_fetcher import MOTILAL_SYMBOLS, fetch_inav_motilal
 from data_importer.fetchers.nippon_inav_fetcher import NIPPON_SYMBOL_MAP, fetch_inav_nippon
