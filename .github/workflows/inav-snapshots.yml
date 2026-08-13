@@ -1,14 +1,21 @@
 name: inav-snapshots
 
-# Capture live iNAV snapshots every 5 min during NSE market hours and commit
+# Capture live iNAV snapshots every ~5 min during NSE market hours and commit
 # them to market_data/inav/{SYMBOL}/{YYYY}/{MM}/{DD}.csv in this repo.
 # NSE hours: 09:15-15:30 IST = 03:45-10:00 UTC, Mon-Fri.
+#
+# GitHub's `schedule:` trigger does not reliably fire sub-15-minute cron
+# expressions — observed */5 firing only ~once every 2 hours on this public
+# repo (GitHub coalesces/drops backlogged high-frequency cron ticks instead
+# of queuing each one). Triggering every 15 min instead, then looping 3x
+# inside the job with a 5-min sleep, recovers the intended cadence without
+# depending on GitHub's scheduler honoring every tick.
 
 on:
   schedule:
-    # Every 5 min from 03:00-10:59 UTC, Mon-Fri.
-    # Script re-checks IST boundary and skips out-of-hours ticks.
-    - cron: "*/5 3-10 * * 1-5"
+    # Every 15 min from 03:00-10:59 UTC, Mon-Fri. Each run captures 3x
+    # internally (5-min spacing) to approximate the 5-min cadence.
+    - cron: "*/15 3-10 * * 1-5"
   workflow_dispatch: {}
 
 concurrency:
@@ -21,7 +28,7 @@ permissions:
 jobs:
   capture:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,19 +38,28 @@ jobs:
       - name: Build capture image
         run: docker build -t inav-capture .
 
-      - name: Capture iNAV snapshots
-        run: |
-          docker run --rm \
-            -v "$GITHUB_WORKSPACE:/workspace" \
-            -w /workspace \
-            inav-capture \
-            python scripts/capture_inav_snapshots.py
-
-      - name: Commit new snapshots
+      - name: Capture + commit (3x, 5-min spacing)
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add market_data/inav/ 2>/dev/null || true
-          git diff --cached --quiet && echo "[skip] no new data" && exit 0
-          git commit -m "data: iNAV snapshot $(date -u '+%Y-%m-%d %H:%M UTC')"
-          git push
+
+          for i in 1 2 3; do
+            echo "── capture $i/3 ──"
+            docker run --rm \
+              -v "$GITHUB_WORKSPACE:/workspace" \
+              -w /workspace \
+              inav-capture \
+              python scripts/capture_inav_snapshots.py
+
+            git add market_data/inav/ 2>/dev/null || true
+            if git diff --cached --quiet; then
+              echo "[skip] no new data"
+            else
+              git commit -m "data: iNAV snapshot $(date -u '+%Y-%m-%d %H:%M UTC')"
+              git push
+            fi
+
+            if [ "$i" -lt 3 ]; then
+              sleep 300
+            fi
+          done

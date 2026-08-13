@@ -7,6 +7,7 @@ Round-trip tests for data_importer.inav_csv.
 from datetime import datetime
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from data_importer.inav_csv import (
@@ -77,3 +78,20 @@ def test_read_missing_symbol_returns_empty_frame(tmp_path):
     df = read_inav("NONEXISTENT", start="2026-01-01", base_dir=tmp_path)
     assert df.empty
     assert list(df.columns) == CSV_COLUMNS
+
+
+def test_write_converts_naive_utc_to_ist(tmp_path):
+    # Fetchers hand naive-UTC timestamps; the CSV must persist naive IST (UTC+5:30).
+    row = {"symbol": "GOLDBEES", "snapshot_at": datetime(2026, 8, 4, 3, 45, 0),
+           "inav": 82.15, "market_price": 82.30, "premium_discount_pct": 0.1826, "source": "NSE"}
+    write_inav_rows([row], base_dir=tmp_path)
+    df = read_inav("GOLDBEES", start="2026-08-01", end="2026-08-31", base_dir=tmp_path)
+    assert df["snapshot_at"].iloc[0] == pd.Timestamp(2026, 8, 4, 9, 15, 0)
+
+
+def test_write_rolls_folder_date_across_ist_midnight(tmp_path):
+    # 19:00 UTC -> 00:30 IST the next calendar day; folder must follow IST, not UTC.
+    row = {"symbol": "GOLDBEES", "snapshot_at": datetime(2026, 8, 4, 19, 0, 0),
+           "inav": 82.15, "market_price": 82.30, "premium_discount_pct": 0.1826, "source": "NSE"}
+    written = write_inav_rows([row], base_dir=tmp_path)
+    assert tmp_path / "GOLDBEES" / "2026" / "08" / "05.csv" in written
