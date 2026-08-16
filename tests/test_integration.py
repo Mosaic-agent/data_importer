@@ -7,7 +7,7 @@ These tests verify:
   1. All top-level modules import without error
   2. The Fetcher registry loads with the expected categories
   3. Core abstractions (Fetcher ABC, ClickHouseImporter) are importable
-  4. Sub-packages (amc_holdings, dsp_holdings, backfillers, maintenance) load
+  4. Sub-packages (amc_holdings, amc_downloaders.dsp_holdings, backfillers, maintenance) load
   5. tool_fetchers load (LangChain-decorated functions resolve)
 
 No live network calls or database connections are made — all external I/O is
@@ -123,7 +123,7 @@ SUB_PACKAGES = [
     "data_importer.amc_holdings",
     "data_importer.amc_holdings.base",
     "data_importer.amc_holdings.factory",
-    "data_importer.dsp_holdings",
+    "data_importer.amc_downloaders.dsp_holdings",
     "data_importer.backfillers",
     "data_importer.maintenance",
 ]
