@@ -26,17 +26,28 @@ from src.data_importer.amc_holdings.importers.quant import QuantImporter
 from src.data_importer.amc_holdings.importers.amfi import AmfiImporter
 from src.data_importer.amc_holdings.importers.hdfc import HdfcImporter
 from src.data_importer.amc_holdings.importers.kotak import KotakImporter
+from src.data_importer.amc_holdings.importers.abakkus import AbakkusImporter
+from src.data_importer.amc_holdings.importers.helios import HeliosImporter
+from src.data_importer.amc_holdings.importers.invesco import InvescoImporter
+from src.data_importer.amc_holdings.importers.canara_robeco import CanaraRobecoImporter
 
 REGISTRY: dict[str, type[BaseFundImporter]] = {
-    "icici":       IciciMFImporter,
-    "nippon":      NipponImporter,
-    "icici-index": IciciIndexImporter,
-    "dsp":         DspImporter,
-    "bajaj":       BajajImporter,
-    "quant":       QuantImporter,
-    "amfi":        AmfiImporter,
-    "kotak":       KotakImporter,
-    "hdfc":        HdfcImporter,
+    "icici":         IciciMFImporter,
+    "nippon":        NipponImporter,
+    "icici-index":   IciciIndexImporter,
+    "dsp":           DspImporter,
+    "bajaj":         BajajImporter,
+    "quant":         QuantImporter,
+    "amfi":          AmfiImporter,
+    "kotak":         KotakImporter,
+    "hdfc":          HdfcImporter,
+    "abakkus":       AbakkusImporter,
+    "abacus":        AbakkusImporter,
+    "helios":        HeliosImporter,
+    "invesco":       InvescoImporter,
+    "canara":        CanaraRobecoImporter,
+    "canara_robeco": CanaraRobecoImporter,
+    "canara-robeco": CanaraRobecoImporter,
 }
 
 
