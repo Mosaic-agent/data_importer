@@ -7,6 +7,7 @@ yfinance>=0.2.40
 clickhouse-connect>=0.7.0
 nselib>=2.5.0
 beautifulsoup4>=4.12.0
+openpyxl>=3.1.0
 feedparser>=6.0.0
 rich>=13.0.0
 gnews>=0.3.0
