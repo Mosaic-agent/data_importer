@@ -6,10 +6,15 @@ on:
   pull_request:
     branches: ["main"]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   integration-tests:
     name: Integration Tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -42,4 +47,3 @@ jobs:
           LLM_PROVIDER: "openai"
           LLM_MODEL: "gpt-4o"
         run: python -m pytest tests/ -v --tb=short
-
