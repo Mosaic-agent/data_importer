@@ -186,7 +186,7 @@ def fetch_newsapi_articles(symbol: str, company_name: str = "", target_date: str
     # short-TTL disk cache below and were never part of the symbol's
     # historical corpus used by correlation/RAG queries.
     if all_items:
-        from src.tools.news_search import _cache_articles_to_qdrant
+        from src.data_importer.tool_fetchers.news_search import _cache_articles_to_qdrant
         _cache_articles_to_qdrant(symbol, all_items)
 
     # Persist to cache so next call within TTL window skips the HTTP request
