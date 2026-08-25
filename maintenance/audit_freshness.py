@@ -79,6 +79,14 @@ def audit_freshness():
     except Exception as e:
         results.append(("AMC_Holdings", "market_data.mf_holdings", f"Error: {e}"))
 
+    # 7. Check NSE Bulk & Block Deals (Events)
+    try:
+        res = client.query("SELECT max(deal_date) FROM market_data.bulk_block_deals FINAL")
+        max_date = res.result_rows[0][0] if res.result_rows else None
+        results.append(("Bulk_Deals", "market_data.bulk_block_deals", max_date))
+    except Exception as e:
+        results.append(("Bulk_Deals", "market_data.bulk_block_deals", f"Error: {e}"))
+
     # Print results
     table = Table(title="Category Freshness Audit", show_header=True, header_style="bold magenta")
     table.add_column("Category", style="cyan")
@@ -155,6 +163,7 @@ def audit_freshness():
             elif import_name == "inav": import_name = "inav"
             elif import_name == "indian_macro": import_name = "indian_macro"
             elif import_name == "fii_dii": import_name = "fii_dii"
+            elif import_name == "bulk_deals": import_name = "bulk_deals"
             elif import_name == "amc_holdings": import_name = "dsp,nippon,icici,quant,bajaj,hdfc,kotak,abakkus,helios,invesco,canara,mirae,axis,motilal"
             stale_categories.append(import_name)
 
