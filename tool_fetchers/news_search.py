@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import random
 import time
+from datetime import date
 from typing import Any
 
 from gnews import GNews
@@ -129,6 +130,114 @@ def _infer_sentiment(text: str) -> Sentiment:
     return Sentiment.NEUTRAL
 
 
+def _load_cached_news(symbol: str, target_dt: date | None = None) -> list[NewsItem]:
+    """Check ClickHouse market_data.news_articles for cached news before hitting external search."""
+    try:
+        from src.db.pool import query_df
+        from datetime import datetime
+        import pandas as pd
+
+        if target_dt:
+            date_clause = "AND toDate(published_at) = {t_dt:Date}"
+            params = {"sym": symbol.upper(), "t_dt": target_dt}
+        else:
+            date_clause = ""
+            params = {"sym": symbol.upper()}
+
+        df = query_df(
+            f"""
+            SELECT title, source, published_at, url, sentiment, max(fetched_at) as last_fetched
+            FROM market_data.news_articles FINAL
+            WHERE etfs_impacted = {{sym:String}}
+              AND category != 'nse_announcements'
+              {date_clause}
+            GROUP BY title, source, published_at, url, sentiment
+            ORDER BY published_at DESC
+            LIMIT 15
+            """,
+            parameters=params,
+        )
+        if not df.empty and len(df) >= 3:
+            last_fetched = df["last_fetched"].max()
+            if last_fetched:
+                now_dt = datetime.now()
+                last_dt = pd.to_datetime(last_fetched).to_pydatetime()
+                # If fetched within last 12 hours, return cache
+                if (now_dt - last_dt).total_seconds() < 43200:
+                    logger.info(
+                        "News cache hit for %s (%d articles) — skipping live Google News fetch",
+                        symbol.upper(), len(df),
+                    )
+                    return [
+                        NewsItem(
+                            title=str(r["title"]),
+                            source=str(r["source"]),
+                            published_at=str(r["published_at"]),
+                            url=str(r["url"]),
+                            description="",
+                            # This table also stores macro-event rows (BULLISH/BEARISH
+                            # labels) alongside stock news (POSITIVE/NEGATIVE/NEUTRAL) —
+                            # only accept the Sentiment enum's own members here so a
+                            # macro-labelled row can't slip through mislabelled.
+                            sentiment=Sentiment(str(r["sentiment"]).upper()) if str(r["sentiment"]).upper() in Sentiment.__members__ else Sentiment.NEUTRAL,
+                        )
+                        for _, r in df.iterrows()
+                    ]
+    except Exception as exc:
+        logger.debug("ClickHouse news cache check skipped for %s: %s", symbol, exc)
+    return []
+
+
+def _retrieve_cached_news_from_qdrant(
+    symbol: str, company_name: str = "", target_dt=None
+) -> list[NewsItem]:
+    """
+    RAG-first read path: query Qdrant's news_articles collection (semantic +
+    symbol-scoped, ±7-day window around target_dt/today) before touching the
+    network. _cache_articles_to_qdrant() has always WRITTEN fetched articles
+    here; nothing ever READ them back for the "no specific date" case, so a
+    plain "recent news" query always re-fetched live even when Qdrant already
+    held relevant, freshly-indexed articles for this symbol.
+
+    Returns [] on any failure or empty hit — callers fall through to a live
+    fetch (which will index into this same collection for next time).
+    """
+    try:
+        from datetime import date as _date
+        from src.ml.correlation.news_rag import retrieve_articles
+
+        query_text = f"{company_name or symbol} stock news"
+        around = target_dt or _date.today()
+        hits = retrieve_articles(
+            query=query_text,
+            around_date=around,
+            days=7,
+            k=settings.news_articles_per_stock,
+            symbol=symbol,
+        )
+        items: list[NewsItem] = []
+        for h in hits:
+            sent_str = str(h.get("sentiment") or "NEUTRAL").upper()
+            sentiment = Sentiment(sent_str) if sent_str in Sentiment.__members__ else Sentiment.NEUTRAL
+            items.append(NewsItem(
+                title=h.get("title", ""),
+                source=h.get("source", ""),
+                published_at=h.get("published_at", ""),
+                url=h.get("url", ""),
+                description="",
+                sentiment=sentiment,
+            ))
+        if items:
+            logger.info(
+                "Qdrant RAG news hit for %s (%d articles) — skipping live Google News fetch",
+                symbol.upper(), len(items),
+            )
+        return items
+    except Exception as exc:
+        logger.debug("Qdrant news RAG lookup skipped for %s: %s", symbol, exc)
+        return []
+
+
 def fetch_news_for_symbol(symbol: str, company_name: str = "", target_date: str = "") -> list[NewsItem]:
     """
     Fetch news articles for a given NSE/BSE stock symbol via Google News, filtered by target date.
@@ -184,6 +293,19 @@ def fetch_news_for_symbol(symbol: str, company_name: str = "", target_date: str 
             )
             for c in cached[: settings.news_articles_per_stock]
         ]
+
+    # Second cache tier: direct ClickHouse lookup (works with or without a
+    # specific target_dt, unlike the exact-match Qdrant check above).
+    ch_cached = _load_cached_news(symbol, target_dt)
+    if ch_cached:
+        return ch_cached[: settings.news_articles_per_stock]
+
+    # Third cache tier: semantic Qdrant window search — covers "recent news"
+    # queries (no target_dt) and near-date misses that the exact-match check
+    # above skips entirely.
+    rag_items = _retrieve_cached_news_from_qdrant(symbol, company_name, target_dt)
+    if rag_items:
+        return rag_items[: settings.news_articles_per_stock]
 
     # Calculate dynamic lookback needed to cover the target date if provided
     lookback_days = settings.news_lookback_days
@@ -251,6 +373,15 @@ def fetch_news_for_symbol(symbol: str, company_name: str = "", target_date: str 
     # coverage for it — previously only same-day articles ever got indexed,
     # which starved thinly-researched stocks (e.g. ITC) of any usable corpus.
     _cache_articles_to_qdrant(symbol, all_items)
+
+    if not items and all_items:
+        # Live fetch found real articles, but none matched the strict
+        # target-date equality check above (e.g. target_date="today" but
+        # nothing published exactly today) — they were still just indexed,
+        # so re-query Qdrant's date-WINDOW retrieval instead of returning
+        # nothing despite having real data. Fall back to the raw fetch only
+        # if even that comes up empty (e.g. embedding failed).
+        items = _retrieve_cached_news_from_qdrant(symbol, company_name, target_dt) or all_items[: settings.news_articles_per_stock]
 
     return items
 
