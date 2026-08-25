@@ -33,6 +33,8 @@ from src.data_importer.amc_holdings.importers.canara_robeco import CanaraRobecoI
 from src.data_importer.amc_holdings.importers.mirae import MiraeImporter
 from src.data_importer.amc_holdings.importers.axis import AxisImporter
 from src.data_importer.amc_holdings.importers.motilal import MotilalOswalImporter
+from src.data_importer.amc_holdings.importers.edelweiss import EdelweissImporter
+from src.data_importer.amc_holdings.importers.qsif import QsifImporter
 
 REGISTRY: dict[str, type[BaseFundImporter]] = {
     "icici":          IciciMFImporter,
@@ -41,6 +43,8 @@ REGISTRY: dict[str, type[BaseFundImporter]] = {
     "dsp":            DspImporter,
     "bajaj":          BajajImporter,
     "quant":          QuantImporter,
+    "qsif":           QsifImporter,
+    "edelweiss":      EdelweissImporter,
     "amfi":           AmfiImporter,
     "kotak":          KotakImporter,
     "hdfc":           HdfcImporter,
@@ -61,6 +65,7 @@ REGISTRY: dict[str, type[BaseFundImporter]] = {
     "motilal_oswal":  MotilalOswalImporter,
     "motilal-oswal":  MotilalOswalImporter,
 }
+
 
 
 def register_importer(name: str):
