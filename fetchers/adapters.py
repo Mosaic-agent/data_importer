@@ -821,6 +821,30 @@ class AmfiCategoryFlowsFetcher(Fetcher):
         return max(r["report_month"] for r in rows)
 
 
+# ── NSE Bulk & Block Deals ──────────────────────────────────────────────────
+
+class BulkBlockDealsFetcher(Fetcher):
+    """
+    NSE Bulk and Block Deals data via nselib / direct NSE API.
+    """
+    source_name  = "nse_bulk_block"
+    symbol_key   = "NSE"
+    dataset      = "deals"
+    description  = "NSE Bulk & Block Deals"
+    overlap_days = 3
+    first_run_lookback_days = 365
+
+    def fetch(self, from_date: date, to_date: date, *, source: str | None = None) -> list[dict[str, Any]]:
+        from src.data_importer.fetchers.bulk_block_deals_fetcher import fetch_nse_bulk_and_block_deals
+        return fetch_nse_bulk_and_block_deals(from_date=from_date, to_date=to_date)
+
+    def insert(self, rows: list[dict], ch) -> int:
+        return ch.insert_bulk_block_deals(rows)
+
+    def max_date(self, rows: list[dict]) -> date:
+        return max(r["deal_date"] for r in rows)
+
+
 # ── Registry ──────────────────────────────────────────────────────────────────
 # Maps CLI category name → Fetcher instance.
 # The orchestrator loops over this — adding a new source = one line here.
@@ -850,6 +874,8 @@ def _build_registry() -> dict[str, Fetcher]:
     registry["nse_eod"]      = NseEodFetcher(ETFS, STOCKS)
     registry["indian_macro"] = IndianMacroFetcher()
     registry["amfi_flows"]   = AmfiCategoryFlowsFetcher()
+    registry["bulk_deals"]   = BulkBlockDealsFetcher()
+    registry["events"]       = BulkBlockDealsFetcher()
     registry["mf"]      = MFNavFetcher(MF_SCHEME_CODES)
     registry["fii_dii"] = FIIDIIFetcher()
     registry["fx_rates"] = FXRatesFetcher()

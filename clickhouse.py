@@ -407,6 +407,24 @@ ENGINE = ReplacingMergeTree(imported_at)
 ORDER BY (trade_date)
 """
 
+_DDL_BULK_BLOCK_DEALS = """
+CREATE TABLE IF NOT EXISTS market_data.bulk_block_deals (
+    deal_date     Date,
+    deal_type     LowCardinality(String),
+    symbol        LowCardinality(String),
+    security_name String,
+    client_name   String,
+    buy_sell      LowCardinality(String),
+    quantity      Float64,
+    trade_price   Float64,
+    value_cr      Float64,
+    remarks       String,
+    imported_at   DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(imported_at)
+ORDER BY (deal_date, deal_type, symbol, client_name, buy_sell, quantity, trade_price)
+"""
+
 _DDL_SIGNAL_COMPOSITE = """
 CREATE TABLE IF NOT EXISTS market_data.signal_composite (
     as_of               Date,
@@ -797,6 +815,7 @@ class ClickHouseImporter:
             _DDL_MACRO_INDICATORS, _DDL_INDIAN_MACRO_INDICATORS, _DDL_IMPORT_FAILURES,
             _DDL_AGENT_TRACES, _DDL_AGENT_PREFERENCES, _DDL_CORPORATE_ACTIONS,
             _DDL_LIVE_QUOTES, _DDL_LIVE_ALERTS, _DDL_AMFI_CATEGORY_FLOWS,
+            _DDL_BULK_BLOCK_DEALS,
             _DDL_MF_HOLDING_SUMMARIES, _DDL_MV_MF_HOLDING_SUMMARIES,
         ):
             self._client.command(ddl)
@@ -1628,6 +1647,45 @@ class ClickHouseImporter:
                 "report_month", "category_name", "subcategory_group",
                 "gross_purchase_cr", "gross_redemption_cr", "net_flow_cr",
                 "closing_aum_cr", "flow_pct_of_aum",
+            ],
+        )
+        return len(rows)
+
+    def insert_bulk_block_deals(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        dry_run: bool = False,
+    ) -> int:
+        """
+        Bulk-insert NSE bulk and block deals into market_data.bulk_block_deals.
+        """
+        if not rows:
+            return 0
+        if dry_run:
+            logger.info("[dry-run] Would insert %d bulk/block deal rows.", len(rows))
+            return len(rows)
+        self._client.insert(
+            "market_data.bulk_block_deals",
+            [
+                [
+                    r["deal_date"],
+                    r["deal_type"],
+                    r["symbol"],
+                    r["security_name"],
+                    r["client_name"],
+                    r["buy_sell"],
+                    r["quantity"],
+                    r["trade_price"],
+                    r["value_cr"],
+                    r.get("remarks", ""),
+                ]
+                for r in rows
+            ],
+            column_names=[
+                "deal_date", "deal_type", "symbol", "security_name",
+                "client_name", "buy_sell", "quantity", "trade_price",
+                "value_cr", "remarks",
             ],
         )
         return len(rows)
