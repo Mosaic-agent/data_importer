@@ -200,18 +200,31 @@ def audit_qdrant_freshness(console):
     ch = get_client()
 
     checks = [
-        # (qdrant_collection, ch_query_for_max_date, payload_date_field, label)
+        # (qdrant_collection, ch_query_for_max_date, payload_date_field, ts_field, label)
         ("mf_holdings",      "SELECT max(as_of_month) FROM market_data.mf_holdings FINAL",
          "as_of_month",      "as_of_timestamp",   "MF Holdings"),
         ("mf_fund_profiles", "SELECT max(as_of_month) FROM market_data.mf_holdings FINAL",
          "as_of_month",      "as_of_timestamp",   "MF Fund Profiles"),
-        ("news_articles",    "SELECT max(toString(toDate(published_at))) FROM market_data.news_articles FINAL",
+        ("news_articles",    "SELECT max(toString(toDate(fetched_at))) FROM market_data.news_articles FINAL",
          "published_date",   "published_timestamp", "News Articles"),
-        ("market_anomalies", "SELECT max(toString(trade_date)) FROM market_data.daily_prices FINAL WHERE category='etfs'",
+        ("market_anomalies", "SELECT max(toString(trade_date)) FROM market_data.daily_prices FINAL WHERE category IN ('stocks', 'etfs')",
          "trade_date",       "trade_timestamp",   "Market Anomalies"),
         ("market_data",      "SELECT max(toString(trade_date)) FROM market_data.daily_prices FINAL",
          "trade_date",       "trade_timestamp",   "Market Data"),
     ]
+
+    from qdrant_client.http import models
+
+    # Ensure float range index exists for timestamp ordering
+    for coll_name, _, _, ts_field, _ in checks:
+        try:
+            qc.create_payload_index(
+                collection_name=coll_name,
+                field_name=ts_field,
+                field_schema=models.PayloadSchemaType.FLOAT,
+            )
+        except Exception:
+            pass
 
     table = Table(title="Qdrant vs ClickHouse Staleness", show_header=True, header_style="bold blue")
     table.add_column("Collection", style="cyan")
@@ -235,12 +248,13 @@ def audit_qdrant_freshness(console):
             if point_count == 0:
                 qdrant_date = "EMPTY"
             else:
-                # Scroll to get a sample of recent points by ordering
+                # Scroll to get the latest point by timestamp descending
                 try:
+                    from qdrant_client.http import models
                     hits = qc.scroll(
                         collection_name=coll_name,
                         limit=1,
-                        order_by=ts_field,
+                        order_by=models.OrderBy(key=ts_field, direction=models.Direction.DESC),
                         with_payload=[date_field],
                     )
                     if hits[0]:
@@ -259,10 +273,14 @@ def audit_qdrant_freshness(console):
             point_count = 0
             qdrant_date = "N/A"
 
+        # Compare monthly fields as YYYY-MM, daily fields as YYYY-MM-DD
+        cmp_qdrant = str(qdrant_date)[:7] if "month" in date_field else str(qdrant_date)
+        cmp_ch = str(ch_date)[:7] if "month" in date_field else str(ch_date)
+
         is_stale = (
             ch_date not in ("ERROR", "?")
             and qdrant_date not in ("N/A", "EMPTY", "?")
-            and str(qdrant_date) < str(ch_date)
+            and cmp_qdrant < cmp_ch
         )
         if qdrant_date in ("N/A", "EMPTY"):
             status = "[yellow]EMPTY[/yellow]"
