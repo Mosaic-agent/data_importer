@@ -12,7 +12,11 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+import sys
 from datetime import datetime
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../..")))
 
 from src.data_importer.amc_holdings.importers.qsif import QsifImporter
 
@@ -28,6 +32,7 @@ def main() -> None:
         description="Import Quant SIF portfolio disclosures (.xlsx/.xls) into ClickHouse (market_data.mf_holdings)"
     )
     parser.add_argument("--file", type=str, default=None, help="Path to statutory Excel workbook (.xlsx / .xls)")
+    parser.add_argument("--fund", type=str, default=None, help="Target specific fund (e.g. 'Active Asset Allocator', 'Hybrid')")
     parser.add_argument("--dry-run", action="store_true", help="Parse without inserting into ClickHouse")
     parser.add_argument("--test", action="store_true", help="Process only the first source for testing")
     parser.add_argument("--full-reimport", action="store_true", help="Re-import all discovered historical months")
@@ -47,6 +52,7 @@ def main() -> None:
         full_reimport=args.full_reimport,
         target_month=target_month,
         excel_file=args.file,
+        fund=args.fund,
     )
 
     importer.run(dry_run=args.dry_run, test=args.test)
