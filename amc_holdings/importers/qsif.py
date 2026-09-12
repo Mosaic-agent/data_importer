@@ -128,13 +128,17 @@ class QsifImporter(BaseFundImporter):
         full_reimport: bool = False,
         target_month: date | None = None,
         excel_file: str | None = None,
+        fund: str | None = None,
     ) -> None:
         super().__init__(target_month=target_month)
         self.from_year = from_year
         self.full_reimport = full_reimport
         self._excel_file = excel_file
+        self.fund = fund
 
     def fund_name(self) -> str:
+        if self.fund:
+            return f"{self.AMC_NAME} ({self.fund})"
         return self.AMC_NAME
 
     def table_name(self) -> str:
@@ -170,7 +174,7 @@ class QsifImporter(BaseFundImporter):
         years = [str(y) for y in range(current_year, self.from_year - 1, -1)]
 
         with httpx.Client(headers=_HEADERS, timeout=15.0, follow_redirects=True) as http:
-            for cat in ["MONTHLY PORTFOLIO - FUND - WISE", "HALF YEARLY PORTFOLIO"]:
+            for cat in ["MONTHLY PORTFOLIO - FUND - WISE", "HALF YEARLY PORTFOLIO", "MONTHLY PORTFOLIO"]:
                 for year in years:
                     for month_id in range(1, 13):
                         payload = {"id": str(month_id), "cat": cat, "tab": year}
@@ -210,6 +214,14 @@ class QsifImporter(BaseFundImporter):
         # Sort descending by date
         sources.sort(key=lambda s: s[0], reverse=True)
 
+        if self.fund:
+            f_clean = self.fund.lower().replace("-", " ").replace("_", " ")
+            def _matches_fund(src: tuple[date, str, str, str]) -> bool:
+                _, title, fname, _ = src
+                t_clean = f"{title} {fname}".lower().replace("-", " ").replace("_", " ")
+                return f_clean in t_clean or any(m in t_clean for m in ["monthly portfolio", "sif monthly"])
+            sources = [s for s in sources if _matches_fund(s)]
+
         if not self.full_reimport and not self._target_month and sources:
             latest_month = sources[0][0]
             sources = [s for s in sources if s[0] == latest_month]
@@ -224,29 +236,47 @@ class QsifImporter(BaseFundImporter):
         sources: list[tuple[date, str, str, str]],
         client: Any,
     ) -> list[tuple[date, str, str, str]]:
-        """Skip sources whose month is already recorded in import_watermarks."""
+        """Skip sources whose scheme code and month are already recorded in import_watermarks."""
         if self.full_reimport:
             return sources
 
-        existing_months: set[date] = set()
+        existing_watermarks: set[tuple[str, date]] = set()
         try:
             rows = client.query(
-                "SELECT DISTINCT toDate(last_date) "
+                "SELECT symbol, toDate(last_date) "
                 "FROM market_data.import_watermarks "
                 "WHERE source = 'mf_holdings' "
                 "  AND symbol LIKE 'QSIF_%'"
             ).result_rows
-            for (dt,) in rows:
+            for sym, dt in rows:
                 if isinstance(dt, date):
-                    existing_months.add(dt.replace(day=1))
+                    existing_watermarks.add((sym, dt.replace(day=1)))
         except Exception as exc:
             self._console.print(f"[yellow]Failed to query QSIF watermarks: {exc}[/yellow]")
             return sources
 
-        if not existing_months:
+        if not existing_watermarks:
             return sources
 
-        filtered = [s for s in sources if s[0].replace(day=1) not in existing_months]
+        filtered: list[tuple[date, str, str, str]] = []
+        for s in sources:
+            src_date, title, fname, _ = s
+            src_m = src_date.replace(day=1)
+            code, _ = resolve_fund_identity(f"{title} {fname}")
+            if code.startswith("QSIF_") and not code.endswith("_DIRECT") and "MONTHLY" in code:
+                known_schemes = {
+                    "QSIF_EQUITY_LS_DIRECT",
+                    "QSIF_HYBRID_DIRECT",
+                    "QSIF_EX_TOP_100_DIRECT",
+                    "QSIF_ACTIVE_ALLOCATOR_DIRECT",
+                }
+                if all((sc, src_m) in existing_watermarks for sc in known_schemes):
+                    continue
+            else:
+                if (code, src_m) in existing_watermarks:
+                    continue
+            filtered.append(s)
+
         skipped = len(sources) - len(filtered)
         if skipped:
             self._console.print(
@@ -296,7 +326,24 @@ class QsifImporter(BaseFundImporter):
                 logger.warning("Error parsing sheet '%s' in %s: %s", sheet_name, filename, exc)
 
         logger.info("  %s (%s): %d holdings parsed", title, as_of_date, len(rows))
+        if self.fund:
+            f_clean = self.fund.lower().replace("-", " ").replace("_", " ")
+            rows = [
+                r for r in rows
+                if f_clean in r["fund_name"].lower().replace("-", " ").replace("_", " ")
+                or f_clean in r["scheme_code"].lower().replace("-", " ").replace("_", " ")
+            ]
         return rows
+
+    def watermark_rows(self, all_rows: list[dict[str, Any]]) -> list[tuple[str, date]]:
+        """Record watermark per scheme_code."""
+        latest: dict[str, date] = {}
+        for r in all_rows:
+            sym = r.get("scheme_code")
+            d = r.get("as_of_month")
+            if sym and d and (sym not in latest or d > latest[sym]):
+                latest[sym] = d
+        return list(latest.items())
 
     def _load_workbook_bytes(self, url_or_path: str, http: httpx.Client) -> bytes:
         if not url_or_path.startswith(("http://", "https://")):
@@ -342,8 +389,26 @@ class QsifImporter(BaseFundImporter):
         if header_idx is None:
             return []
 
-        # Scheme identification
-        scheme_target = sheet_name if sheet_name.strip().upper() not in ["SHEET1", "PAGE 1"] else file_title
+        # Scheme identification: Check top rows (banner) for known fund name first, then sheet name, then file title
+        banner_text = " ".join(
+            " ".join(str(x) for x in df.iloc[r].values if pd.notna(x))
+            for r in range(min(10, len(df)))
+        ).upper()
+        if any(k in banner_text for k in ["ACTIVE_ASSET_ALLOCATOR", "ACTIVE ASSET ALLOCATOR", "ALLOCATOR"]):
+            scheme_target = "QSIF ACTIVE ASSET ALLOCATOR"
+        elif any(k in banner_text for k in ["EX_TOP_100", "EX-TOP 100", "EX TOP 100"]):
+            scheme_target = "QSIF EQUITY EX TOP 100"
+        elif any(k in banner_text for k in ["SECTOR_ROTATION", "SECTOR ROTATION"]):
+            scheme_target = "QSIF SECTOR ROTATION"
+        elif "HYBRID" in banner_text:
+            scheme_target = "QSIF HYBRID"
+        elif any(k in banner_text for k in ["EQUITY LONG SHORT", "EQUITY LONG-SHORT", "EQUITY_LONG_SHORT"]):
+            scheme_target = "QSIF EQUITY LONG SHORT"
+        elif sheet_name.strip().upper() not in ["SHEET1", "PAGE 1", "PAGE1"]:
+            scheme_target = sheet_name
+        else:
+            scheme_target = file_title
+
         scheme_code, fund_name = resolve_fund_identity(scheme_target)
 
         records: list[dict[str, Any]] = []
@@ -359,64 +424,61 @@ class QsifImporter(BaseFundImporter):
 
             row_str = " ".join([str(x).upper() for x in row.values if pd.notna(x)])
 
-            if "DERIVATIVES" in row_str:
-                current_section = "DERIVATIVES"
+            if pd.isna(c6) or pd.isna(c7):
+                if "DERIVATIVES" in row_str:
+                    current_section = "DERIVATIVES"
+                elif "DEBT INSTRUMENTS" in row_str or "MONEY MARKET" in row_str:
+                    current_section = "DEBT"
+                elif "FIXED DEPOSITS" in row_str or "OTHERS" in row_str or "TRI PARTY REPO" in row_str or "TREPS" in row_str:
+                    current_section = "OTHER"
+                elif "EQUITY & EQUITY RELATED" in row_str:
+                    current_section = "EQUITY"
+                elif "COMMODITY" in row_str:
+                    current_section = "COMMODITY"
+                elif "GRAND TOTAL" in row_str or "DISCLOSURE FOR INVESTMENT" in row_str or "NOTES :-" in row_str:
+                    break
                 continue
-            elif "DEBT INSTRUMENTS" in row_str or "MONEY MARKET" in row_str:
-                current_section = "DEBT"
-                continue
-            elif "FIXED DEPOSITS" in row_str or "OTHERS" in row_str or "TRI PARTY REPO" in row_str or "TREPS" in row_str:
-                current_section = "OTHER"
-                continue
-            elif "EQUITY & EQUITY RELATED" in row_str:
-                current_section = "EQUITY"
-                continue
-            elif "COMMODITY" in row_str:
-                current_section = "COMMODITY"
-                continue
-            elif "GRAND TOTAL" in row_str or "DISCLOSURE FOR INVESTMENT" in row_str or "NOTES :-" in row_str:
-                break
 
             if "SUB TOTAL" in row_str or "TOTAL" in row_str or not c2:
                 continue
 
-            if pd.notna(c6) and pd.notna(c7):
-                try:
-                    mkt_val_lakhs = float(str(c6).replace(",", "").strip())
-                    pct_nav = float(str(c7).replace(",", "").replace("%", "").strip())
-                    mkt_val_cr = mkt_val_lakhs / 100.0
+            try:
+                mkt_val_lakhs = float(str(c6).replace(",", "").strip())
+                pct_nav = float(str(c7).replace(",", "").replace("%", "").strip())
+                mkt_val_cr = mkt_val_lakhs / 100.0
 
-                    sec_name = c2.strip()
-                    if len(sec_name) < 3:
-                        continue
+                sec_name = c2.strip()
+                if len(sec_name) < 3:
+                    continue
 
-                    # Validate real ISIN
-                    isin = c1 if c1 and len(c1) == 12 and not c1.isdigit() and c1.lower() != "nan" else _deterministic_isin(sec_name)
+                # Validate real ISIN or exchange derivative contract symbol
+                c1_clean = c1.strip()
+                isin = c1_clean if c1_clean and c1_clean.lower() != "nan" and not c1_clean.isdigit() and len(c1_clean) >= 4 else _deterministic_isin(sec_name)
 
-                    # Classify asset
-                    if current_section == "DERIVATIVES" or "FUTURES" in sec_name.upper() or "OPTION" in sec_name.upper() or mkt_val_cr < 0 or pct_nav < 0:
-                        asset_type = "other"
-                    elif current_section == "DEBT" or "TREPS" in sec_name.upper() or "BILL" in sec_name.upper() or "REPO" in sec_name.upper():
-                        asset_type = "bond"
-                    elif "GOLD" in sec_name.upper() or "SILVER" in sec_name.upper() or current_section == "COMMODITY":
-                        asset_type = "gold"
-                    elif "NET CURRENT ASSETS" in sec_name.upper() or "CASH" in sec_name.upper():
-                        asset_type = "cash"
-                    else:
-                        asset_type = classify_asset(sec_name)
+                # Classify asset
+                if current_section == "DERIVATIVES" or "FUTURES" in sec_name.upper() or "OPTION" in sec_name.upper() or mkt_val_cr < 0 or pct_nav < 0:
+                    asset_type = "other"
+                elif current_section == "DEBT" or "TREPS" in sec_name.upper() or "BILL" in sec_name.upper() or "REPO" in sec_name.upper():
+                    asset_type = "bond"
+                elif "GOLD" in sec_name.upper() or "SILVER" in sec_name.upper() or current_section == "COMMODITY":
+                    asset_type = "gold"
+                elif "NET CURRENT ASSETS" in sec_name.upper() or "CASH" in sec_name.upper():
+                    asset_type = "cash"
+                else:
+                    asset_type = classify_asset(sec_name)
 
-                    records.append({
-                        "scheme_code": scheme_code,
-                        "fund_name": fund_name,
-                        "as_of_month": as_of_date,
-                        "isin": isin,
-                        "security_name": sec_name,
-                        "asset_type": asset_type,
-                        "market_value_cr": round(mkt_val_cr, 4),
-                        "pct_of_nav": round(pct_nav, 4),
-                        "imported_at": imported_at,
-                    })
-                except Exception:
-                    pass
+                records.append({
+                    "scheme_code": scheme_code,
+                    "fund_name": fund_name,
+                    "as_of_month": as_of_date,
+                    "isin": isin,
+                    "security_name": sec_name,
+                    "asset_type": asset_type,
+                    "market_value_cr": round(mkt_val_cr, 4),
+                    "pct_of_nav": round(pct_nav, 4),
+                    "imported_at": imported_at,
+                })
+            except Exception:
+                pass
 
         return records

@@ -186,7 +186,8 @@ class StocksFetcher(Fetcher):
     def fetch(self, from_date: date, to_date: date, *, source: str | None = None) -> list[dict[str, Any]]:
         import time
         from src.data_importer.fetchers.earnings_fetcher import fetch_earnings
-        from src.data_importer.fetchers.insider_fetcher import fetch_insider_trades
+        from src.data_importer.fetchers.insider_fetcher import fetch_insider_trades as fetch_insider_trades_yf
+        from src.data_importer.fetchers.nse_pit_fetcher import fetch_insider_trades as fetch_insider_trades_nse
         from src.data_importer.fetchers.valuation_fetcher import fetch_valuation
         from src.data_importer.fetchers.yfinance_fetcher import fetch_ohlcv as yf_fetch_ohlcv
 
@@ -215,7 +216,13 @@ class StocksFetcher(Fetcher):
         rows.extend(earnings)
 
         time.sleep(_STOCKS_BETWEEN_CALLS)
-        insider = fetch_insider_trades(self.symbols)
+        # NSE's PIT disclosure feed covers Indian insider trades; yfinance's
+        # insider_transactions is US SEC Form 4 data and never populates for
+        # .NS symbols (also blocked by Yahoo's EU-only crumb/consent flow).
+        if self.category == "stocks":
+            insider = fetch_insider_trades_nse(self.symbols)
+        else:
+            insider = fetch_insider_trades_yf(self.symbols)
         for r in insider:
             r["_dataset"] = "insider"
         rows.extend(insider)
