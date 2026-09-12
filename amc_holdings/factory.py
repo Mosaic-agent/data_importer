@@ -35,6 +35,7 @@ from src.data_importer.amc_holdings.importers.axis import AxisImporter
 from src.data_importer.amc_holdings.importers.motilal import MotilalOswalImporter
 from src.data_importer.amc_holdings.importers.edelweiss import EdelweissImporter
 from src.data_importer.amc_holdings.importers.qsif import QsifImporter
+from src.data_importer.amc_holdings.importers.altiva_sif import AltivaSifImporter
 
 REGISTRY: dict[str, type[BaseFundImporter]] = {
     "icici":          IciciMFImporter,
@@ -45,6 +46,9 @@ REGISTRY: dict[str, type[BaseFundImporter]] = {
     "quant":          QuantImporter,
     "qsif":           QsifImporter,
     "edelweiss":      EdelweissImporter,
+    "altiva":         AltivaSifImporter,
+    "altiva-sif":     AltivaSifImporter,
+    "altiva_sif":     AltivaSifImporter,
     "amfi":           AmfiImporter,
     "kotak":          KotakImporter,
     "hdfc":           HdfcImporter,
