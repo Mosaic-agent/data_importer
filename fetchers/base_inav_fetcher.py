@@ -54,47 +54,109 @@ def _safe(val: Any, default: float = 0.0) -> float:
         return default
 
 
-def _fetch_yfinance_prices(symbols: list[str]) -> dict[str, float]:
+def _fetch_market_prices(symbols: list[str]) -> dict[str, float]:
     """
-    Batch-fetch the most recent closing price for each NSE symbol.
-
-    Parameters
-    ----------
-    symbols : bare NSE symbols, e.g. ["GOLDBEES", "SILVERBEES"]
-
-    Returns
-    -------
-    dict mapping symbol → last close price (absent if unavailable)
+    Fetch the most recent secondary market price for each NSE ETF/stock.
+    Rule: ALWAYS use Shoonya or NSE first; use ClickHouse daily_prices as verified DB source;
+    yfinance 5d as last resort. Never substitute declared NAV as market price.
     """
     if not symbols:
         return {}
 
-    yf_syms = [f"{s}.NS" for s in symbols]
     prices: dict[str, float] = {}
+
+    # 1. Try Shoonya REST API live quote
     try:
-        data = yf.download(yf_syms, period="1d", progress=False)
-        if data.empty or "Close" not in data.columns:
-            return prices
-        close_df = data["Close"]
-        for sym in symbols:
-            yf_sym = f"{sym}.NS"
-            series = None
-            if hasattr(close_df, "columns"):
-                if yf_sym in close_df.columns:
-                    series = close_df[yf_sym]
-                elif len(yf_syms) == 1:
-                    series = close_df.iloc[:, 0]
-            else:
-                series = close_df
-            if series is not None:
-                series = series.dropna()
-                if not series.empty:
-                    val = series.iloc[-1]
-                    if hasattr(val, "iloc"):
-                        val = val.iloc[-1]
-                    prices[sym] = float(val)
+        from src.data_importer.fetchers.shoonya_fetcher import get_shoonya_api
+        from src.data_importer.tool_fetchers.shoonya_tools import _resolve_token
+        api = get_shoonya_api()
+        if api:
+            for sym in symbols:
+                res = _resolve_token(api, sym)
+                if res:
+                    token, _ = res
+                    quote = api.get_quotes(exchange="NSE", token=token)
+                    if quote and quote.get("stat") == "Ok":
+                        lp = _safe(quote.get("lp"))
+                        if lp > 0:
+                            prices[sym] = lp
     except Exception as exc:
-        logger.warning("yfinance batch price fetch failed: %s", exc)
+        logger.debug("Shoonya price fetch failed: %s", exc)
+
+    # 2. Try NSE Quote API for remaining symbols
+    remaining = [s for s in symbols if s not in prices]
+    if remaining:
+        try:
+            from src.data_importer.fetchers.nse_quote_fetcher import _NSE_HEADERS, _NSE_QUOTE_URL, _NSE_WARMUP, _TIMEOUT
+            import httpx
+            with httpx.Client(headers=_NSE_HEADERS, follow_redirects=True, timeout=_TIMEOUT) as client:
+                try:
+                    client.get(_NSE_WARMUP, timeout=5)
+                except Exception:
+                    pass
+                for sym in remaining:
+                    try:
+                        resp = client.get(_NSE_QUOTE_URL, params={"symbol": sym.upper()}, timeout=_TIMEOUT)
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            p_info = data.get("priceInfo", {})
+                            close = _safe(p_info.get("lastPrice") or p_info.get("close"))
+                            if close > 0:
+                                prices[sym] = close
+                    except Exception:
+                        pass
+        except Exception as exc:
+            logger.debug("NSE quote fetch failed: %s", exc)
+
+    # 3. Try ClickHouse daily_prices (populated via NSE/Shoonya)
+    remaining = [s for s in symbols if s not in prices]
+    if remaining:
+        try:
+            from src.db.pool import query_df
+            sym_list = "', '".join(remaining)
+            df = query_df(f"""
+                SELECT symbol, argMax(close, trade_date) as last_close
+                FROM market_data.daily_prices FINAL
+                WHERE symbol IN ('{sym_list}')
+                GROUP BY symbol
+            """)
+            for _, r in df.iterrows():
+                val = float(r["last_close"])
+                if val > 0:
+                    prices[r["symbol"]] = val
+        except Exception as exc:
+            logger.debug("ClickHouse daily_prices fetch failed: %s", exc)
+
+    # 4. Fall back to yfinance (period='5d' for weekend/after-hours resilience)
+    remaining = [s for s in symbols if s not in prices]
+    if remaining:
+        try:
+            yf_syms = [f"{s}.NS" for s in remaining]
+            data = yf.download(yf_syms, period="5d", progress=False)
+            if not data.empty and "Close" in data.columns:
+                close_df = data["Close"]
+                for sym in remaining:
+                    yf_sym = f"{sym}.NS"
+                    series = None
+                    if hasattr(close_df, "columns"):
+                        if yf_sym in close_df.columns:
+                            series = close_df[yf_sym]
+                        elif len(yf_syms) == 1:
+                            series = close_df.iloc[:, 0]
+                    else:
+                        series = close_df
+                    if series is not None:
+                        series = series.dropna()
+                        if not series.empty:
+                            val = series.iloc[-1]
+                            if hasattr(val, "iloc"):
+                                val = val.iloc[-1]
+                            p = float(val)
+                            if p > 0:
+                                prices[sym] = p
+        except Exception as exc:
+            logger.debug("yfinance batch price fetch failed: %s", exc)
+
     return prices
 
 
@@ -193,7 +255,7 @@ class BaseInavFetcher(ABC):
             logger.info("%s iNAV: no matching symbols in API response", self.source_label)
             return []
 
-        prices = _fetch_yfinance_prices(list(matched))
+        prices = _fetch_market_prices(list(matched))
 
         rows: list[dict[str, Any]] = []
         for sym, item in matched.items():
@@ -211,8 +273,11 @@ class BaseInavFetcher(ABC):
 
             market_price = prices.get(sym)
             if market_price is None or market_price <= 0:
-                fb = self._extract_fallback_price(item)
-                market_price = _safe(fb) if fb is not None else inav
+                logger.warning(
+                    "%s: no secondary market price resolved from Shoonya, NSE, or daily_prices. Skipping to avoid corrupt premium.",
+                    sym,
+                )
+                continue
 
             prem_disc = (market_price - inav) / inav * 100
 
