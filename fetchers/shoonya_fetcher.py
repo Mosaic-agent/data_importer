@@ -125,13 +125,13 @@ def _save_session(session: dict) -> None:
         log.warning("Shoonya: failed to save session to ClickHouse (%s)", exc)
 
 
-def get_shoonya_api():
+def get_shoonya_api(interactive: bool = False):
     """
     Return an authenticated ShoonyaApiPy instance using OAuth flow.
 
     Tries the cached session first; falls back to prompting for a fresh login
-    using credentials from config.settings. Returns None if Shoonya is not
-    configured or login fails.
+    using credentials from config.settings if interactive is True. Returns None
+    if Shoonya is not configured, session is expired/timed out, or login fails.
     """
     try:
         from NorenRestApiPy.NorenApi import NorenApi  # type: ignore
@@ -187,8 +187,8 @@ def get_shoonya_api():
 
     # Resolve interactive code prompt
     import sys
-    if not sys.stdin.isatty():
-        log.warning("Shoonya session expired and terminal is not interactive. Cannot perform OAuth login.")
+    if not interactive or not sys.stdin.isatty():
+        log.warning("Shoonya session unavailable/expired and interactive login disabled/non-tty. Falling back.")
         return None
 
     login_url = f"https://api.shoonya.com/OAuthlogin/investor-entry-level/login?api_key={user}&route_to={user}"
