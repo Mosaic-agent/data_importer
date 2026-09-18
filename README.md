@@ -1,6 +1,8 @@
 # data_importer
 
-Canonical data-ingestion package for the [Mosaic](https://github.com/Mosaic-agent/Mosaic-fund-agent) quantitative research platform. Consolidates all market-data fetchers, AMC/DSP fund importers, ML backfillers, and LangChain-wrapped agent tools into a single importable Python package.
+Canonical data-ingestion package for the main project: [Mosaic Fund Agent](https://github.com/Mosaic-agent/Mosaic-fund-agent). Consolidates all market-data fetchers, AMC/DSP fund importers, ML backfillers, and LangChain-wrapped agent tools into a single importable Python package.
+
+> **Main Project:** This repository serves as the core data engine for the main quantitative research and portfolio platform at [https://github.com/Mosaic-agent/Mosaic-fund-agent](https://github.com/Mosaic-agent/Mosaic-fund-agent).
 
 ## Package layout
 
@@ -78,7 +80,7 @@ python -m data_importer.cli --category etfs,stocks,fii_dii
 
 ## Compat shims
 
-The Mosaic main repo keeps `src/importer/` and the relevant `src/tools/*.py` files as thin `sys.modules` re-export shims so all existing callers (60+ files, 13 YAML playbook references) continue to work without any changes.
+The Mosaic main project repo ([Mosaic Fund Agent](https://github.com/Mosaic-agent/Mosaic-fund-agent)) keeps `src/importer/` and the relevant `src/tools/*.py` files as thin `sys.modules` re-export shims so all existing callers (60+ files, 13 YAML playbook references) continue to work without any changes.
 
 ## License
 

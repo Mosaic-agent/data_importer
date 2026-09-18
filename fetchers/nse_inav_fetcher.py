@@ -160,17 +160,30 @@ def fetch_inav_snapshots(symbols: list[str]) -> list[dict[str, Any]]:
             logger.warning("Motilal AMC iNAV fetch failed: %s", exc)
 
     # Merge: NSE base, then overwrite with AMC-specific rows (higher accuracy)
+    # RULE 18: Never consider NSE EOD feed (static NAV or lagged EOD price) to measure premium vs discount when AMC iNAV feed is available.
     merged: dict[str, dict[str, Any]] = {}
     for r in nse_rows:
         merged[r["symbol"]] = r
-    for r in nippon_rows:
-        merged[r["symbol"]] = r
-    for r in zerodha_rows:
-        merged[r["symbol"]] = r
-    for r in mirae_rows:
-        merged[r["symbol"]] = r
-    for r in motilal_rows:
-        merged[r["symbol"]] = r
+
+    for amc_row in nippon_rows + zerodha_rows + mirae_rows + motilal_rows:
+        sym = amc_row["symbol"]
+        amc_inav = amc_row.get("inav", 0.0)
+        if sym in merged:
+            live_ltp = merged[sym].get("market_price", 0.0)
+            amc_price = amc_row.get("market_price", 0.0)
+            # Prefer live intraday market price (LTP from exchange) over EOD fallback
+            chosen_price = live_ltp if live_ltp > 0 else amc_price
+            prem_disc = ((chosen_price - amc_inav) / amc_inav * 100) if amc_inav > 0 else 0.0
+            merged[sym] = {
+                "symbol": sym,
+                "snapshot_at": amc_row.get("snapshot_at") or snapshot_at,
+                "inav": amc_inav,
+                "market_price": chosen_price,
+                "premium_discount_pct": round(prem_disc, 4),
+                "source": amc_row.get("source", "amc_live"),
+            }
+        else:
+            merged[sym] = amc_row
 
     final_rows = list(merged.values())
 
