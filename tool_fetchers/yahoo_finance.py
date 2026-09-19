@@ -7,6 +7,13 @@ Provides end-of-day prices, financial metrics, sector info, and
 52-week range for NSE/BSE listed stocks using Yahoo Finance's
 free API (no API key required).
 
+Company fundamentals (sector/industry/P-E/P-B/dividend/description/price/
+market-cap/52-week-range) are resolved via the source-agnostic
+`fetch_company_fundamentals()` layer in fundamentals_sources.py, which
+automatically falls back across Yahoo's fast_info and Screener.in when
+Yahoo's crumb-gated `.info` endpoint is blocked — see that module's
+docstring for the full rationale.
+
 Symbol conventions:
   • NSE stocks: RELIANCE.NS, TCS.NS, INFY.NS
   • BSE stocks: RELIANCE.BO, TCS.BO
@@ -25,6 +32,7 @@ from langchain_core.tools import tool
 from config.settings import settings
 from src.models.portfolio import NewsItem, Sentiment, YahooFinanceData
 from src.data_importer.tool_fetchers.news_search import _infer_sentiment
+from src.data_importer.tool_fetchers.fundamentals_sources import fetch_company_fundamentals
 
 logger = logging.getLogger(__name__)
 
@@ -71,44 +79,73 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 
 def fetch_yahoo_data(symbol: str, exchange: str = "NSE") -> YahooFinanceData:
     """
-    Fetch financial data for a single Indian stock from Yahoo Finance.
+    Fetch company fundamentals for a single Indian stock, irrespective of
+    which upstream source actually answers.
+
+    Delegates to `fetch_company_fundamentals()` (see fundamentals_sources.py),
+    which tries Yahoo's `.info`, then Yahoo's `fast_info`, then Screener.in
+    in priority order and merges whatever fields each one resolves — so a
+    block on any single provider (most commonly Yahoo's crumb-gated `.info`
+    401'ing) degrades gracefully instead of zeroing out the whole result.
 
     Args:
         symbol:   Zerodha trading symbol e.g. 'RELIANCE'
         exchange: 'NSE' (default) or 'BSE'
 
     Returns:
-        YahooFinanceData model populated from Yahoo Finance info dict.
+        YahooFinanceData model populated from whichever source(s) resolved
+        each field; `data_source` records provenance, `fetch_error` is set
+        only if fields remain unresolved after every source was tried.
     """
     yf_symbol = _build_yf_symbol(symbol, exchange)
-    logger.info("Fetching Yahoo Finance data for %s", yf_symbol)
+    logger.info("Fetching company fundamentals for %s", yf_symbol)
 
     try:
-        ticker = yf.Ticker(yf_symbol)
-        info: dict[str, Any] = ticker.info or {}
-
-        return YahooFinanceData(
-            symbol=yf_symbol,
-            sector=info.get("sector", ""),
-            industry=info.get("industry", ""),
-            # Market cap: Yahoo returns in USD for Indian stocks sometimes;
-            # we keep as-is since it's comparative rather than absolute here
-            market_cap=_safe_float(info.get("marketCap")),
-            pe_ratio=_safe_float(info.get("trailingPE")),
-            pb_ratio=_safe_float(info.get("priceToBook")),
-            # yfinance now returns dividendYield already as a percent (e.g. 5.52, not 0.0552)
-            dividend_yield=_safe_float(info.get("dividendYield")),
-            fifty_two_week_high=_safe_float(info.get("fiftyTwoWeekHigh")),
-            fifty_two_week_low=_safe_float(info.get("fiftyTwoWeekLow")),
-            current_price=_safe_float(
-                info.get("currentPrice") or info.get("regularMarketPrice")
-            ),
-            description=info.get("longBusinessSummary", ""),
-        )
-
+        merged = fetch_company_fundamentals(symbol, yf_symbol, exchange)
     except Exception as exc:
-        logger.warning("Yahoo Finance fetch failed for %s: %s", yf_symbol, exc)
-        return YahooFinanceData(symbol=yf_symbol)
+        logger.warning("Company fundamentals fetch failed for %s: %s", yf_symbol, exc)
+        return YahooFinanceData(symbol=yf_symbol, fetch_error=str(exc))
+
+    sources_used = merged.pop("_sources_used", [])
+
+    # Only flag fetch_error when a whole *group* of fields came back empty —
+    # a single missing field (e.g. no dividend_yield because the stock just
+    # doesn't pay one) is normal and shouldn't be reported as a failure.
+    # A group being *entirely* empty means no source could answer any of it.
+    qualitative_fields = ("sector", "industry", "pe_ratio", "pb_ratio", "dividend_yield", "description")
+    price_fields = ("market_cap", "current_price", "fifty_two_week_high", "fifty_two_week_low")
+
+    errors = []
+    if all(f not in merged for f in qualitative_fields):
+        errors.append(
+            "sector/industry/P-E/P-B/dividend yield/description unavailable from every "
+            "source tried"
+        )
+    if all(f not in merged for f in price_fields):
+        errors.append("price/market cap/52-week range unavailable from every source tried")
+
+    fetch_error = ""
+    if errors:
+        fetch_error = (
+            f"{'; '.join(errors)} (tried: {', '.join(sources_used) or 'none reachable'})."
+        )
+        logger.warning("fetch_yahoo_data: %s for %s", fetch_error, yf_symbol)
+
+    return YahooFinanceData(
+        symbol=yf_symbol,
+        sector=merged.get("sector", ""),
+        industry=merged.get("industry", ""),
+        market_cap=merged.get("market_cap", 0.0),
+        pe_ratio=merged.get("pe_ratio", 0.0),
+        pb_ratio=merged.get("pb_ratio", 0.0),
+        dividend_yield=merged.get("dividend_yield", 0.0),
+        fifty_two_week_high=merged.get("fifty_two_week_high", 0.0),
+        fifty_two_week_low=merged.get("fifty_two_week_low", 0.0),
+        current_price=merged.get("current_price", 0.0),
+        description=merged.get("description", ""),
+        data_source="+".join(sources_used),
+        fetch_error=fetch_error,
+    )
 
 
 def fetch_price_history(
@@ -200,7 +237,13 @@ def get_yahoo_finance_data(input_str: str) -> dict[str, Any]:
         data.symbol.endswith((".NS", ".BO"))
         or exchange.upper() in ("NSE", "BSE")
     )
-    if is_indian:
+    # `data.market_cap` may still be populated via the fast_info fallback
+    # even when `fetch_error` is set (that error only covers sector/PE/PB/
+    # dividend/description, which fast_info can't provide) — so key off the
+    # actual value rather than blanket-hiding it whenever fetch_error is set.
+    if not data.market_cap:
+        market_cap_formatted = "Unavailable"
+    elif is_indian:
         mc_crore = data.market_cap / 1e7
         market_cap_formatted = f"₹{mc_crore:,.2f} Cr"
     else:
@@ -222,6 +265,8 @@ def get_yahoo_finance_data(input_str: str) -> dict[str, Any]:
         "price_yoy_change_pct": yoy_pct,
         "market_cap_yoy_change_pct": yoy_pct, # assuming constant outstanding shares
         "description": data.description[:500] if data.description else "",
+        "data_source": data.data_source,
+        "error": data.fetch_error,
     }
 
 
@@ -450,28 +495,23 @@ def get_market_cap_category(input_str: str) -> dict[str, Any]:
     symbol   = parts[0].strip().upper()
     exchange = parts[1].strip().upper() if len(parts) > 1 else "NSE"
 
-    time.sleep(0.3)   # be polite to Yahoo Finance
+    time.sleep(0.3)   # be polite to upstream sources
 
-    yf_symbol = _build_yf_symbol(symbol, exchange)
-    try:
-        info: dict[str, Any] = yf.Ticker(yf_symbol).info or {}
-    except Exception as exc:
-        logger.warning("get_market_cap_category: fetch failed for %s: %s", yf_symbol, exc)
-        return {
-            "symbol":       yf_symbol,
-            "error":        str(exc),
-            "cap_category": "Unknown",
-            "exchange":     exchange,
-        }
+    # Reuse the same source-agnostic fetch as get_yahoo_finance_data — this
+    # already tries Yahoo .info, then fast_info, then Screener.in in order,
+    # so cap classification keeps working even when any single source (most
+    # commonly Yahoo's crumb-gated .info) is blocked.
+    data = fetch_yahoo_data(symbol, exchange)
+    yf_symbol = data.symbol
+    mc_raw = data.market_cap
 
-    mc_raw = _safe_float(info.get("marketCap"))
     if mc_raw <= 0:
         return {
             "symbol":       yf_symbol,
             "market_cap_raw": 0,
             "cap_category": "Unknown",
             "exchange":     exchange,
-            "error":        "Market cap not available from Yahoo Finance",
+            "error":        data.fetch_error or "Market cap not available from any source for this symbol.",
         }
 
     is_indian = (
@@ -492,8 +532,9 @@ def get_market_cap_category(input_str: str) -> dict[str, Any]:
             "cap_category":         category,
             "classification_basis": basis,
             "exchange":             exchange,
-            "sector":               info.get("sector", ""),
-            "industry":             info.get("industry", ""),
+            "sector":               data.sector,
+            "industry":             data.industry,
+            "data_source":          data.data_source,
         }
     else:
         b         = mc_raw / 1e9
@@ -508,8 +549,9 @@ def get_market_cap_category(input_str: str) -> dict[str, Any]:
             "cap_category":         category,
             "classification_basis": basis,
             "exchange":             exchange,
-            "sector":               info.get("sector", ""),
-            "industry":             info.get("industry", ""),
+            "sector":               data.sector,
+            "industry":             data.industry,
+            "data_source":          data.data_source,
         }
 
 

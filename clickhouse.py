@@ -157,6 +157,7 @@ _ALTER_LOWCARDINALITY = [
     "ALTER TABLE market_data.import_watermarks MODIFY COLUMN IF EXISTS source LowCardinality(String)",
     # add dataset column to import_watermarks for fine-grained watermark tracking
     "ALTER TABLE market_data.import_watermarks ADD COLUMN IF NOT EXISTS dataset LowCardinality(String) DEFAULT 'prices'",
+    "ALTER TABLE market_data.user_holdings ADD COLUMN IF NOT EXISTS status String DEFAULT 'OPEN'",
 ]
 
 _DDL_COT_GOLD = """
@@ -576,10 +577,26 @@ CREATE TABLE IF NOT EXISTS market_data.user_holdings (
     pnl                   Float64,
     day_change            Float64,
     day_change_percentage Float64,
+    status                String DEFAULT 'OPEN',
     imported_at           DateTime DEFAULT now()
 )
 ENGINE = ReplacingMergeTree(imported_at)
-ORDER BY (tradingsymbol, imported_at)
+ORDER BY (tradingsymbol)
+"""
+
+_DDL_PORTFOLIO_HOLDING_EVENTS = """
+CREATE TABLE IF NOT EXISTS market_data.portfolio_holding_events (
+    tradingsymbol           String,
+    isin                    String,
+    event_type              String,   -- OPENED | INCREASED | DECREASED | AVG_PRICE_CHANGED | CLOSED
+    quantity                Float64,
+    average_price           Float64,
+    previous_quantity       Float64,
+    previous_average_price  Float64,
+    detected_at             DateTime DEFAULT now()
+)
+ENGINE = MergeTree
+ORDER BY (tradingsymbol, detected_at)
 """
 
 _DDL_USER_PROFILE = """
@@ -810,7 +827,7 @@ class ClickHouseImporter:
             _DDL_FII_DII_MONTHLY, _DDL_FII_DII_FNO_DAILY, _DDL_NEWS_ARTICLES,
             _DDL_SIGNAL_COMPOSITE, _DDL_WEIGHT_CHECKPOINTS, _DDL_PIPELINE_MANIFEST,
             _DDL_STOCK_EARNINGS, _DDL_STOCK_INSIDER, _DDL_STOCK_VALUATION,
-            _DDL_USER_HOLDINGS, _DDL_USER_PROFILE,
+            _DDL_USER_HOLDINGS, _DDL_PORTFOLIO_HOLDING_EVENTS, _DDL_USER_PROFILE,
             _DDL_USER_MARGINS, _DDL_USER_POSITIONS, _DDL_USER_ORDERS,
             _DDL_MACRO_INDICATORS, _DDL_INDIAN_MACRO_INDICATORS, _DDL_IMPORT_FAILURES,
             _DDL_AGENT_TRACES, _DDL_AGENT_PREFERENCES, _DDL_CORPORATE_ACTIONS,
@@ -827,7 +844,44 @@ class ClickHouseImporter:
                 self._client.command(alter)
             except Exception as exc:  # non-fatal — table may not exist yet
                 logger.debug("Schema migration skipped (%s): %s", alter[:60], exc)
+        self._migrate_user_holdings_sort_key()
         logger.debug("ClickHouse schema verified.")
+
+    def _migrate_user_holdings_sort_key(self) -> None:
+        """
+        Fix user_holdings' ORDER BY so ReplacingMergeTree+FINAL actually collapses
+        to the latest row per symbol.
+
+        The original table had `imported_at` as part of the sort key, so FINAL
+        never deduped multiple snapshots of the same symbol. ClickHouse can't
+        narrow a compound ORDER BY via ALTER once the (implicit) primary key
+        already spans it ("Primary key must be a prefix of the sorting key"),
+        so this only auto-fixes tables that are still empty — recreating a
+        populated table would need an explicit backfill, not an implicit one.
+        """
+        try:
+            current_order_by = self._client.query(
+                "SELECT sorting_key FROM system.tables "
+                "WHERE database = 'market_data' AND name = 'user_holdings'"
+            ).result_rows
+            if not current_order_by or current_order_by[0][0] == "tradingsymbol":
+                return  # table doesn't exist yet, or already fixed
+            row_count = self._client.query(
+                "SELECT count() FROM market_data.user_holdings"
+            ).result_rows[0][0]
+            if row_count == 0:
+                self._client.command("DROP TABLE market_data.user_holdings")
+                self._client.command(_DDL_USER_HOLDINGS)
+                logger.info("Migrated market_data.user_holdings to ORDER BY (tradingsymbol) (table was empty)")
+            else:
+                logger.warning(
+                    "market_data.user_holdings has %d rows with the old sort key "
+                    "(tradingsymbol, imported_at) — FINAL queries will not dedupe "
+                    "correctly per symbol until this table is manually migrated.",
+                    row_count,
+                )
+        except Exception as exc:
+            logger.debug("user_holdings sort-key migration check skipped: %s", exc)
 
     # ── Bulk insert: user_holdings ────────────────────────────────────────────
 
@@ -838,6 +892,7 @@ class ClickHouseImporter:
         Each row dict must have keys:
             tradingsymbol, exchange, isin, quantity, average_price,
             last_price, pnl, day_change, day_change_percentage
+        Optional key: status ('OPEN' | 'CLOSED', defaults to 'OPEN').
         """
         if not rows:
             return 0
@@ -852,6 +907,7 @@ class ClickHouseImporter:
                 r["pnl"],
                 r["day_change"],
                 r["day_change_percentage"],
+                r.get("status", "OPEN"),
             ]
             for r in rows
         ]
@@ -860,10 +916,43 @@ class ClickHouseImporter:
             data,
             column_names=[
                 "tradingsymbol", "exchange", "isin", "quantity", "average_price",
-                "last_price", "pnl", "day_change", "day_change_percentage",
+                "last_price", "pnl", "day_change", "day_change_percentage", "status",
             ],
         )
         logger.info("Inserted %d user holdings into market_data.user_holdings", len(rows))
+        return len(rows)
+
+    def insert_portfolio_holding_events(self, rows: list[dict[str, Any]]) -> int:
+        """
+        Insert delta events into market_data.portfolio_holding_events.
+
+        Each row dict must have keys:
+            tradingsymbol, isin, event_type, quantity, average_price,
+            previous_quantity, previous_average_price
+        """
+        if not rows:
+            return 0
+        data = [
+            [
+                r["tradingsymbol"],
+                r["isin"],
+                r["event_type"],
+                r["quantity"],
+                r["average_price"],
+                r["previous_quantity"],
+                r["previous_average_price"],
+            ]
+            for r in rows
+        ]
+        self._client.insert(
+            "market_data.portfolio_holding_events",
+            data,
+            column_names=[
+                "tradingsymbol", "isin", "event_type", "quantity", "average_price",
+                "previous_quantity", "previous_average_price",
+            ],
+        )
+        logger.info("Inserted %d portfolio holding events", len(rows))
         return len(rows)
 
     def insert_user_profile(self, r: dict[str, Any]) -> int:

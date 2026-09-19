@@ -2,24 +2,36 @@
 src/importer/fetchers/valuation_fetcher.py
 ───────────────────────────────────────────
 Fetch current valuation snapshot (PE, PB, margins, analyst consensus, etc.)
-via yfinance .info for a list of symbols.
+for a list of symbols.
+
+market_cap / trailing_pe / price_to_book are resolved via the source-agnostic
+fetch_company_fundamentals() layer (fundamentals_sources.py), which falls
+back across Yahoo's fast_info and Screener.in when Yahoo's crumb-gated
+.info endpoint 401s — see that module's docstring for the full rationale.
+The remaining fields below (forward P/E, PEG, price/sales, debt/equity, ROE,
+margins, revenue/earnings growth, free cash flow, beta, analyst target/
+recommendation) have no free non-.info alternative anywhere in this
+codebase, so they still come straight from yfinance .info and will read as
+0/"" whenever that endpoint is blocked.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date
 
 import yfinance as yf
 
+from src.data_importer.tool_fetchers.fundamentals_sources import fetch_company_fundamentals
+
 logger = logging.getLogger(__name__)
 
-_FLOAT_FIELDS = {
-    "market_cap":        "marketCap",
-    "trailing_pe":       "trailingPE",
+# Fields with no non-.info fallback source — read directly from yfinance
+# .info only; these stay 0.0 whenever Yahoo's crumb handshake is blocked.
+_INFO_ONLY_FLOAT_FIELDS = {
     "forward_pe":        "forwardPE",
     "peg_ratio":         "pegRatio",
-    "price_to_book":     "priceToBook",
     "price_to_sales":    "priceToSalesTrailing12Months",
     "debt_to_equity":    "debtToEquity",
     "return_on_equity":  "returnOnEquity",
@@ -32,6 +44,15 @@ _FLOAT_FIELDS = {
     "beta":              "beta",
     "target_price":      "targetMeanPrice",
 }
+
+
+def _exchange_for(yahoo_ticker: str) -> str:
+    """Infer exchange from a Yahoo ticker suffix (.NS/.BO) — else assume US."""
+    if yahoo_ticker.endswith(".NS"):
+        return "NSE"
+    if yahoo_ticker.endswith(".BO"):
+        return "BSE"
+    return "US"
 
 
 def fetch_valuation(symbols: list[tuple[str, str]]) -> list[dict]:
@@ -55,24 +76,43 @@ def fetch_valuation(symbols: list[tuple[str, str]]) -> list[dict]:
     today = date.today()
 
     for internal, yahoo in symbols:
+        exchange = _exchange_for(yahoo)
+        clean_symbol = re.sub(r"\.(NS|BO)$", "", yahoo, flags=re.I).upper()
+
         try:
-            info = yf.Ticker(yahoo).info
-            if not info or not isinstance(info, dict):
-                logger.warning("No valid valuation info returned for %s (rate-limited or unavailable)", yahoo)
-                continue
-            row: dict = {"symbol": internal, "snapshot_date": today}
+            fundamentals = fetch_company_fundamentals(clean_symbol, yahoo, exchange)
+        except Exception as exc:
+            logger.warning("fetch_company_fundamentals failed for %s: %s", yahoo, exc)
+            fundamentals = {}
+        sources_used = fundamentals.pop("_sources_used", [])
 
-            for col, key in _FLOAT_FIELDS.items():
-                val = info.get(key)
-                row[col] = float(val) if val is not None else 0.0
+        try:
+            info = yf.Ticker(yahoo).info or {}
+        except Exception as exc:
+            logger.warning("yfinance .info fetch failed for %s: %s", yahoo, exc)
+            info = {}
 
-            row["recommendation"] = str(info.get("recommendationKey") or "")
-            row["analyst_count"] = int(info.get("numberOfAnalystOpinions") or 0)
+        if not fundamentals.get("market_cap") and not info:
+            logger.warning("No valuation data available for %s from any source (rate-limited or unavailable)", yahoo)
+            continue
 
-            rows.append(row)
-            logger.info("Fetched valuation snapshot for %s", yahoo)
+        row: dict = {"symbol": internal, "snapshot_date": today}
+        row["market_cap"]    = fundamentals.get("market_cap", 0.0)
+        row["trailing_pe"]   = fundamentals.get("pe_ratio", 0.0)
+        row["price_to_book"] = fundamentals.get("pb_ratio", 0.0)
 
-        except Exception as e:
-            logger.error("Error fetching valuation for %s: %s", yahoo, e)
+        for col, key in _INFO_ONLY_FLOAT_FIELDS.items():
+            val = info.get(key)
+            row[col] = float(val) if val is not None else 0.0
+
+        row["recommendation"] = str(info.get("recommendationKey") or "")
+        row["analyst_count"] = int(info.get("numberOfAnalystOpinions") or 0)
+
+        rows.append(row)
+        logger.info(
+            "Fetched valuation snapshot for %s (market_cap/PE/PB via: %s)",
+            yahoo, "+".join(sources_used) or "none",
+        )
 
     return rows
+
