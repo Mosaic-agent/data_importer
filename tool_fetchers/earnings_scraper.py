@@ -18,14 +18,20 @@ from __future__ import annotations
 import logging
 import re
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import requests
 from bs4 import BeautifulSoup
 from langchain_core.tools import tool
 
 from config.settings import settings
-from src.models.portfolio import QuarterlyResult
+
+if TYPE_CHECKING:
+    # Only needed for type hints (deferred by `from __future__ import
+    # annotations` above) — src.models lives in the parent Mosaic-fund-agent
+    # repo and isn't importable when data_importer runs standalone, so the
+    # real import happens lazily at call sites below instead.
+    from src.models.portfolio import QuarterlyResult
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +70,8 @@ def fetch_from_screener(symbol: str) -> QuarterlyResult | None:
     Returns:
         QuarterlyResult if data found, None on failure.
     """
+    from src.models.portfolio import QuarterlyResult
+
     time.sleep(settings.scrape_delay_seconds)
 
     url = f"{SCREENER_BASE}/company/{symbol}/consolidated/"
@@ -187,6 +195,8 @@ def fetch_from_yahoo_financials(symbol: str, exchange: str = "NSE") -> Quarterly
     """
     try:
         import yfinance as yf
+
+        from src.models.portfolio import QuarterlyResult
 
         if exchange.upper() in ("US", "NASDAQ", "NYSE"):
             yf_symbol = symbol
