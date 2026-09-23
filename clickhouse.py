@@ -1227,6 +1227,25 @@ class ClickHouseImporter:
         rows = result.result_rows
         if rows:
             return rows[0][0]  # clickhouse_connect returns date objects
+
+        # Cross-source fallback for prices: if switching sources (e.g. yfinance/nse -> shoonya),
+        # reuse the latest watermark established by any source for this symbol, or check daily_prices
+        if dataset == "prices":
+            res = self._client.query(
+                "SELECT max(last_date) FROM market_data.import_watermarks FINAL "
+                "WHERE symbol = {symbol:String} AND dataset = 'prices'",
+                parameters={"symbol": symbol},
+            )
+            if res.result_rows and res.result_rows[0][0]:
+                return res.result_rows[0][0]
+            res_dp = self._client.query(
+                "SELECT max(trade_date) FROM market_data.daily_prices FINAL "
+                "WHERE symbol = {symbol:String}",
+                parameters={"symbol": symbol},
+            )
+            if res_dp.result_rows and res_dp.result_rows[0][0]:
+                return res_dp.result_rows[0][0]
+
         return None
 
     def set_watermark(self, source: str, symbol: str, last_date: date, dataset: str = "prices") -> None:
@@ -1950,6 +1969,7 @@ class ClickHouseImporter:
         data_source: str = "",
         target_month: str = "",
         freshness_months: int = 0,
+        include_fundamentals: bool = False,
     ) -> dict[str, Any]:
         """
         Execute the import logic (refactored from cli.py).
@@ -1971,6 +1991,7 @@ class ClickHouseImporter:
             clickhouse_password=self._password,
             target_month=target_month,
             freshness_months=freshness_months,
+            include_fundamentals=include_fundamentals,
         )
         return {"status": "success", "categories": categories}
 

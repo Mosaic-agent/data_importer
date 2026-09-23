@@ -25,6 +25,7 @@ def import_single_stock(
     clickhouse_config: dict,
     dry_run: bool = False,
     data_source: str = "shoonya",
+    include_fundamentals: bool = False,
 ) -> dict:
     """
     Import price and other relevant data (earnings, insider, valuation) for a single stock.
@@ -48,7 +49,8 @@ def import_single_stock(
 
     try:
         # Stagger thread start to avoid thundering-herd on the upstream APIs
-        time.sleep(_INITIAL_SLEEP)
+        if include_fundamentals:
+            time.sleep(_INITIAL_SLEEP)
 
         with pool.acquire() as client:
             ch = ClickHouseImporter(
@@ -87,6 +89,9 @@ def import_single_stock(
                     ch.set_watermark(data_source, symbol, max_date, dataset="prices")
                 else:
                     results["prices_inserted"] = len(prices)
+
+            if not include_fundamentals:
+                return results
 
             time.sleep(_BETWEEN_CALLS)
 
@@ -132,10 +137,11 @@ def run_parallel_stock_import(
     category: str,
     lookback_days: int = 365,
     full_reimport: bool = False,
-    workers: int = 5,
+    workers: int = 10,
     clickhouse_config: dict = None,
     dry_run: bool = False,
     data_source: str = "shoonya",
+    include_fundamentals: bool = False,
 ) -> dict:
     """
     Run parallel import for a list of stocks.
@@ -155,7 +161,8 @@ def run_parallel_stock_import(
         futures = {
             executor.submit(
                 import_single_stock, sym, ticker, category, lookback_days,
-                full_reimport, clickhouse_config, dry_run, data_source
+                full_reimport, clickhouse_config, dry_run, data_source,
+                include_fundamentals,
             ): sym
             for sym, ticker in symbols
         }

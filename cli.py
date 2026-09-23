@@ -51,6 +51,7 @@ def run_import(
     data_source: str = "",
     target_month: str = "",
     freshness_months: int = 0,
+    include_fundamentals: bool = False,
 ) -> None:
     """
     Run the historical data import for the specified categories.
@@ -136,7 +137,7 @@ def run_import(
                  "nse_indices", "nse_eod", "indian_macro", "fx_rates",
                  "cot", "cb_reserves", "etf_aum", "mf", "fii_dii",
                  "world_bank", "imf_weo", "amfi_flows", "nse_delivery",
-                 "bulk_deals", "events"}
+                 "bulk_deals", "events", "fundamentals", "stock_fundamentals"}
     ]
     for category in registry_categories:
         fetcher = get_registry().get(category)
@@ -144,13 +145,16 @@ def run_import(
             console.print(f"[yellow]⚠ Unknown category: {category}, skipping[/yellow]")
             continue
 
+        if include_fundamentals and hasattr(fetcher, "include_fundamentals"):
+            fetcher.include_fundamentals = True
+
         symbol_list = getattr(fetcher, "symbols", [])
         console.print(
             f"\n[bold cyan]▶ {category.upper()}[/bold cyan]"
             + (f" ({len(symbol_list)} symbols)" if symbol_list else "")
         )
 
-        workers = 5 if fetcher.supports_parallel and category in ("stocks", "us_stocks") else 1
+        workers = 10 if fetcher.supports_parallel and category in ("stocks", "us_stocks", "fundamentals", "stock_fundamentals") else 1
         effective_source = (
             selected_source if fetcher.supports_source_override and selected_source
             else fetcher.source_name
