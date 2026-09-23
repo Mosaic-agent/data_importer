@@ -171,17 +171,34 @@ class StocksFetcher(Fetcher):
     # re-fetch of every other symbol already caught up.
     per_symbol_watermark = True
 
-    def __init__(self, category: str, symbols: list[tuple[str, str]]) -> None:
+    def __init__(
+        self,
+        category: str,
+        symbols: list[tuple[str, str]],
+        include_fundamentals: bool = False,
+        fundamentals_only: bool = False,
+    ) -> None:
         self.category    = category
         self.symbols     = symbols
         self.source_name = "shoonya" if category == "stocks" else "yfinance"
         self.symbol_key  = category.upper()
-        self.description = f"Stocks (prices+earnings+insider+valuation) — {category} ({len(symbols)} symbols)"
+        self.include_fundamentals = include_fundamentals or fundamentals_only
+        self.fundamentals_only = fundamentals_only
+        mode = "fundamentals only" if fundamentals_only else ("prices+fundamentals" if self.include_fundamentals else "prices only")
+        self.description = f"Stocks ({mode}) — {category} ({len(symbols)} symbols)"
         # us_stocks has no Shoonya/NSE presence — --data-source is ignored for
         # it today (import_single_stock always passes data_source="yfinance"
         # for us_stocks, regardless of the CLI override), so only "stocks"
         # actually honors a source override.
-        self.supports_source_override = category == "stocks"
+        self.supports_source_override = category == "stocks" and not fundamentals_only
+
+    def for_symbol(self, sym: str, ticker: str) -> "Fetcher":
+        return type(self)(
+            self.category,
+            [(sym, ticker)],
+            include_fundamentals=self.include_fundamentals,
+            fundamentals_only=self.fundamentals_only,
+        )
 
     def fetch(self, from_date: date, to_date: date, *, source: str | None = None) -> list[dict[str, Any]]:
         import time
@@ -191,23 +208,28 @@ class StocksFetcher(Fetcher):
         from src.data_importer.fetchers.valuation_fetcher import fetch_valuation
         from src.data_importer.fetchers.yfinance_fetcher import fetch_ohlcv as yf_fetch_ohlcv
 
-        time.sleep(_STOCKS_INITIAL_SLEEP)
+        if self.include_fundamentals:
+            time.sleep(_STOCKS_INITIAL_SLEEP)
 
         rows: list[dict[str, Any]] = []
         effective_source = source or self.source_name
 
-        if self.category == "stocks":
-            if effective_source == "nse":
-                prices = NSElibFetcher(self.category, self.symbols).fetch(from_date, to_date)
-            elif effective_source == "yfinance":
-                prices = yf_fetch_ohlcv(self.symbols, self.category, from_date, to_date)
+        if not self.fundamentals_only:
+            if self.category == "stocks":
+                if effective_source == "nse":
+                    prices = NSElibFetcher(self.category, self.symbols).fetch(from_date, to_date)
+                elif effective_source == "yfinance":
+                    prices = yf_fetch_ohlcv(self.symbols, self.category, from_date, to_date)
+                else:
+                    prices = ShoonyaFetcher(self.category, self.symbols).fetch(from_date, to_date)
             else:
-                prices = ShoonyaFetcher(self.category, self.symbols).fetch(from_date, to_date)
-        else:
-            prices = yf_fetch_ohlcv(self.symbols, self.category, from_date, to_date)
-        for r in prices:
-            r["_dataset"] = "prices"
-        rows.extend(prices)
+                prices = yf_fetch_ohlcv(self.symbols, self.category, from_date, to_date)
+            for r in prices:
+                r["_dataset"] = "prices"
+            rows.extend(prices)
+
+        if not self.include_fundamentals:
+            return rows
 
         time.sleep(_STOCKS_BETWEEN_CALLS)
         earnings = fetch_earnings(self.symbols)
@@ -247,6 +269,8 @@ class StocksFetcher(Fetcher):
             ch.insert_stock_insider(by_dataset["insider"])
         if by_dataset["valuation"]:
             ch.insert_stock_valuation(by_dataset["valuation"])
+        if self.fundamentals_only:
+            return len(by_dataset["earnings"]) + len(by_dataset["insider"]) + len(by_dataset["valuation"])
         return n
 
     def validate(self, rows: list[dict]) -> list[dict]:
@@ -262,7 +286,8 @@ class StocksFetcher(Fetcher):
         return date.today()
 
     def count_insertable(self, rows: list[dict]) -> int:
-        # dry-run preview must match insert()'s real-run count — prices only.
+        if self.fundamentals_only:
+            return len([r for r in rows if r.get("_dataset") != "prices"])
         return len([r for r in rows if r.get("_dataset") == "prices"])
 
     def write_group_watermarks(
@@ -270,9 +295,6 @@ class StocksFetcher(Fetcher):
     ) -> None:
         if dry_run or not rows:
             return
-        # Watermark the source that actually produced these rows, not the
-        # fetcher's static default — a --data-source nse run must not have
-        # its watermark silently read back by tomorrow's default-source run.
         effective_source = source or self.source_name
         today = date.today()
         by_symbol_dataset: dict[tuple[str, str], list[dict]] = {}
@@ -284,7 +306,7 @@ class StocksFetcher(Fetcher):
             if ds == "prices":
                 ch.set_watermark(effective_source, sym, max(r["trade_date"] for r in ds_rows), dataset="prices")
             else:
-                ch.set_watermark("yfinance", sym, today, dataset=ds)
+                ch.set_watermark("yfinance" if ds != "insider" or self.category != "stocks" else "nse", sym, today, dataset=ds)
 
 
 # ── yfinance OHLCV (stocks / ETFs / commodities / indices) ──────────────────
@@ -873,10 +895,12 @@ def _build_registry() -> dict[str, Fetcher]:
         if cat == "etfs":
             registry[cat] = ShoonyaFetcher(cat, sym_list)  # Shoonya → nselib (etfs) → yfinance
         elif cat in {"stocks", "us_stocks"}:
-            registry[cat] = StocksFetcher(cat, sym_list)   # prices + earnings + insider + valuation
+            registry[cat] = StocksFetcher(cat, sym_list, include_fundamentals=False)   # prices only for fast daily sync
         else:
             registry[cat] = YFinanceFetcher(cat, sym_list) # global symbols
 
+    registry["fundamentals"]       = StocksFetcher("stocks", STOCKS, include_fundamentals=True, fundamentals_only=True)
+    registry["stock_fundamentals"] = StocksFetcher("stocks", STOCKS, include_fundamentals=True, fundamentals_only=True)
     registry["nse_indices"] = NseIndexFetcher(NSE_ONLY_INDICES)
     registry["nse_eod"]      = NseEodFetcher(ETFS, STOCKS)
     registry["indian_macro"] = IndianMacroFetcher()

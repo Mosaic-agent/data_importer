@@ -288,6 +288,7 @@ INAV_SYMBOLS: list[str] = [
 ALL_CATEGORIES = list(CATEGORY_MAP.keys()) + [
     "mf", "inav", "nse_eod", "cot", "cb_reserves", "etf_aum", "mf_holdings",
     "fii_dii", "amfi_flows", "bulk_deals", "events", "earnings", "insider", "valuation",
+    "fundamentals", "stock_fundamentals",
     # Macro fundamentals (annual, free public APIs — no auth required)
     "world_bank", "imf_weo", "indian_macro", "indian_macro_indicators",
     # AMC fund-holdings importers (factory pattern in src/scripts/fund_imports/)
