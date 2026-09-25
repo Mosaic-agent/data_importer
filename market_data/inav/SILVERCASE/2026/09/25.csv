@@ -1,3 +1,4 @@
 snapshot_at,inav,market_price,premium_discount_pct,source
 2026-09-25T13:12:20,22.9593,23.010000228881836,0.2208,zerodha_amc_live
 2026-09-25T13:12:20,22.9593,23.020000457763672,0.2644,zerodha_amc_live
+2026-09-25T13:53:00,23.0269,23.020000457763672,-0.03,zerodha_amc_live
