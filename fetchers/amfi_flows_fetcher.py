@@ -243,7 +243,7 @@ def _fetch_via_portal_statistical_reports(target_months: list[date]) -> list[dic
             continue
         url = f"https://portal.amfiindia.com/spages/am{m_code}{dt.year}repo.xls"
         try:
-            resp = httpx.get(url, headers=headers, timeout=8)
+            resp = httpx.get(url, headers=headers, timeout=15)
             if resp.status_code != 200 or len(resp.content) < 5000:
                 continue
             parsed = _parse_excel_content(resp.content, [dt])
@@ -578,66 +578,141 @@ def _fetch_via_manual_url(target_months: list[date]) -> list[dict]:
 
 
 def _parse_excel_content(content: bytes, target_months: list[date]) -> list[dict]:
-    """Parse AMFI Excel binary content using openpyxl."""
-    try:
-        import io
-        import openpyxl
-    except ImportError:
-        logger.warning("openpyxl not installed. Install with: pip install openpyxl")
+    """
+    Parse AMFI Excel binary content.
+    Supports both OpenXML (.xlsx via openpyxl) and legacy BIFF8 (.xls via xlrd).
+    Dynamically identifies column positions for Scheme Name, Inflow, Outflow, and AUM.
+    """
+    import io
+    detected_month = target_months[0] if target_months else date.today().replace(day=1)
+    all_rows = []
+
+    # 1. Try openpyxl if OpenXML zip header
+    if content.startswith(b"PK\x03\x04"):
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+            target_sheet = None
+            for name in wb.sheetnames:
+                if "category" in name.lower() or "wise" in name.lower() or "mcr" in name.lower():
+                    target_sheet = wb[name]
+                    break
+            if target_sheet is None and wb.sheetnames:
+                target_sheet = wb[wb.sheetnames[0]]
+            if target_sheet is not None:
+                all_rows = list(target_sheet.iter_rows(values_only=True))
+        except Exception as exc:
+            logger.debug("openpyxl parse attempt failed: %s", exc)
+
+    # 2. Try xlrd for legacy BIFF8 .xls or fallback
+    if not all_rows:
+        try:
+            import xlrd
+            book = xlrd.open_workbook(file_contents=content)
+            target_sheet = None
+            for name in book.sheet_names():
+                if "category" in name.lower() or "wise" in name.lower() or "mcr" in name.lower():
+                    target_sheet = book.sheet_by_name(name)
+                    break
+            if target_sheet is None and book.sheet_names():
+                target_sheet = book.sheet_by_index(0)
+            if target_sheet is not None:
+                for i in range(target_sheet.nrows):
+                    all_rows.append(target_sheet.row_values(i))
+        except Exception as exc:
+            logger.debug("xlrd parse attempt failed: %s", exc)
+
+    if not all_rows:
+        logger.warning("Could not extract sheet rows with openpyxl or xlrd")
+        return []
+
+    # 3. Detect column positions dynamically
+    col_map = {"name": None, "purchase": None, "redemption": None, "net": None, "aum": None}
+    header_idx = -1
+    for idx, row in enumerate(all_rows[:15]):
+        row_str = " ".join(str(c) for c in row if c is not None).lower()
+        if "scheme name" in row_str or "funds mobilized" in row_str or "repurchase" in row_str:
+            header_idx = idx
+            for c_idx, val in enumerate(row):
+                if val is None:
+                    continue
+                v = str(val).strip().lower()
+                if "scheme name" in v or "category" in v:
+                    col_map["name"] = c_idx
+                elif "funds mobilized" in v or "sales" in v:
+                    col_map["purchase"] = c_idx
+                elif "repurchase" in v or "redemption" in v:
+                    col_map["redemption"] = c_idx
+                elif "net inflow" in v:
+                    col_map["net"] = c_idx
+                elif "net assets under management" in v and "segregated" not in v and "average" not in v:
+                    col_map["aum"] = c_idx
+            break
+
+    # Fixed-position fallback -- ONLY when no header row was recognized at
+    # all (header_idx == -1), matching this module's original pre-dynamic-
+    # detection behavior exactly. When a header WAS found but one column's
+    # label didn't text-match (e.g. AUM only labeled "Average AUM" rather
+    # than "Net Assets Under Management"), do NOT guess a fixed position for
+    # it: a wrong guess can collide with an already correctly-matched column
+    # (verified to silently relabel the redemption or net-flow figure as
+    # AUM) and corrupt real financial data. The per-row loop below already
+    # treats an unresolved numeric column as 0.0.
+    if header_idx == -1:
+        first_row_len = len(all_rows[0]) if all_rows else 0
+        if col_map["name"] is None:
+            col_map["name"] = 1 if first_row_len > 4 else 0
+        if col_map["purchase"] is None:
+            col_map["purchase"] = 4 if first_row_len > 4 else 1
+        if col_map["redemption"] is None:
+            col_map["redemption"] = 5 if first_row_len > 5 else 2
+        if col_map["aum"] is None:
+            col_map["aum"] = 7 if first_row_len > 7 else (4 if first_row_len > 4 else 3)
+    elif col_map["name"] is None:
+        # Category name is structural, not a numeric field -- without a
+        # resolved column there is no safe fixed-position guess (row[None]
+        # would raise), so bail out for this sheet rather than mislabel rows.
+        logger.warning("AMFI Excel: header row found but scheme/category name column not identified -- skipping sheet")
         return []
 
     rows_out = []
-    try:
-        wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
-        # Try "Category-Wise Data" sheet first, then first sheet
-        sheet_names = wb.sheetnames
-        target_sheet = None
-        for name in sheet_names:
-            if "category" in name.lower() or "wise" in name.lower():
-                target_sheet = wb[name]
-                break
-        if target_sheet is None and sheet_names:
-            target_sheet = wb[sheet_names[0]]
-        if target_sheet is None:
-            return []
+    start_row = header_idx + 1 if header_idx >= 0 else 0
+    max_col = max(c for c in col_map.values() if c is not None)
 
-        # Detect header row and month
-        detected_month = target_months[0] if target_months else date.today().replace(day=1)
-        all_rows = list(target_sheet.iter_rows(values_only=True))
+    for row in all_rows[start_row:]:
+        if len(row) <= max_col:
+            continue
+        raw_name = row[col_map["name"]]
+        if raw_name is None:
+            continue
+        category = str(raw_name).strip()
+        if not category:
+            continue
+        cat_lower = category.lower()
+        if any(skip in cat_lower for skip in ["total", "sub total", "grand total", "scheme name", "category", "sr"]):
+            continue
+        if category.replace(".", "").replace(",", "").isdigit():
+            continue
 
-        for row in all_rows:
-            cells = [str(c).strip() if c is not None else "" for c in row]
-            if not cells or not cells[0]:
-                continue
-            category = cells[0].strip()
-            if not category or category.lower() in ("category", "scheme type", "total", "grand total", "none"):
-                continue
-            if category.replace(".", "").replace(",", "").isdigit():
-                continue
-            try:
-                gross_purchase = _parse_amount(cells[1]) if len(cells) > 1 else 0.0
-                gross_redemption = _parse_amount(cells[2]) if len(cells) > 2 else 0.0
-                closing_aum = _parse_amount(cells[4]) if len(cells) > 4 else (
-                    _parse_amount(cells[3]) if len(cells) > 3 else 0.0
-                )
-            except Exception:
-                continue
-            if gross_purchase == 0 and gross_redemption == 0 and closing_aum == 0:
-                continue
-            net_flow = gross_purchase - gross_redemption
-            aum_safe = closing_aum if closing_aum != 0 else None
-            rows_out.append({
-                "report_month":        detected_month,
-                "category_name":       category,
-                "subcategory_group":   _normalize_subcategory(category),
-                "gross_purchase_cr":   gross_purchase,
-                "gross_redemption_cr": gross_redemption,
-                "net_flow_cr":         net_flow,
-                "closing_aum_cr":      closing_aum,
-                "flow_pct_of_aum":     (net_flow / aum_safe * 100) if aum_safe else 0.0,
-            })
-    except Exception as exc:
-        logger.warning("Excel parse failed: %s", exc)
+        pur = _parse_amount(row[col_map["purchase"]]) if col_map["purchase"] is not None else 0.0
+        red = _parse_amount(row[col_map["redemption"]]) if col_map["redemption"] is not None else 0.0
+        aum = _parse_amount(row[col_map["aum"]]) if col_map["aum"] is not None else 0.0
+
+        if pur == 0 and red == 0 and aum == 0:
+            continue
+
+        net = (pur - red) if col_map["net"] is None or row[col_map["net"]] is None else _parse_amount(row[col_map["net"]])
+        aum_safe = aum if aum != 0 else None
+        rows_out.append({
+            "report_month":        detected_month,
+            "category_name":       category,
+            "subcategory_group":   _normalize_subcategory(category),
+            "gross_purchase_cr":   pur,
+            "gross_redemption_cr": red,
+            "net_flow_cr":         net,
+            "closing_aum_cr":      aum,
+            "flow_pct_of_aum":     (net / aum_safe * 100) if aum_safe else 0.0,
+        })
     return rows_out
 
 
