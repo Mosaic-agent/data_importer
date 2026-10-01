@@ -202,6 +202,32 @@ class BaseFundImporter(ABC):
         """Remove already-imported sources (delta sync). Default: import all."""
         return sources
 
+    def discover_pending(self) -> list[Any]:
+        """
+        Fast, read-only discovery: fetch sources and compare against the
+        watermark, without downloading or parsing any source file. Used by
+        the refresh orchestrator to decide which AMCs actually need a real
+        import run, so slow importers aren't re-parsed when nothing is new.
+
+        Unlike dry_run (which intentionally re-parses the full matched set
+        to validate the parser against history), this never touches
+        parse_source — it only answers "is there anything new".
+        """
+        sources = self.fetch_sources()
+
+        if self._target_month:
+            target_first = self._target_month.replace(day=1)
+            sources = [s for s in sources if self.source_month(s) == target_first]
+        elif self._freshness_months > 0:
+            return self._apply_freshness(sources, None)
+
+        client = _ch_client()
+        try:
+            sources = self.filter_sources(sources, client)
+        finally:
+            client.close()
+        return sources
+
     def watermark_rows(self, all_rows: list[dict]) -> list[tuple[str, date]]:
         """
         Derive (symbol, date) watermark pairs from inserted rows.
