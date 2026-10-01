@@ -167,7 +167,7 @@ class AbakkusImporter(BaseFundImporter):
                 self._console.print(f"[red]Abakkus: failed to load disclosures page: {exc}[/red]")
                 return []
 
-            m = re.search(r"const verticals = (\[.*?\]);\s*\n", html, re.DOTALL)
+            m = re.search(r'id="verticals-data"[^>]*>(.*?)</script>', html, re.DOTALL)
             if not m:
                 self._console.print("[red]Abakkus: could not extract verticals JSON from page[/red]")
                 return []
