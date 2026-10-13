@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import socket
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -395,6 +396,21 @@ def _parse_shoonya_date(raw: str) -> date | None:
     return None
 
 
+def _enable_tcp_nodelay(api) -> None:
+    """
+    Disable Nagle's algorithm on the live websocket socket so small packets
+    (heartbeats, single ticks) aren't held back by the OS for delayed-ACK
+    coalescing — NorenApi.start_websocket() has no sockopt passthrough, so
+    this is set directly on the raw socket once the connection is open.
+    """
+    try:
+        raw_sock = api._NorenApi__websocket.sock.sock
+        raw_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        log.debug("Shoonya: TCP_NODELAY enabled on websocket socket")
+    except Exception as exc:
+        log.debug("Shoonya: failed to set TCP_NODELAY (%s)", exc)
+
+
 def _fetch_shoonya_websocket_today_batch(
     api,
     symbols: list[tuple[str, str]],
@@ -446,10 +462,14 @@ def _fetch_shoonya_websocket_today_batch(
                     all_done.set()
 
     try:
+        def _on_open():
+            _enable_tcp_nodelay(api)
+            api.subscribe(tokens)
+
         api.start_websocket(
             order_update_callback=lambda x: None,
             subscribe_callback=on_feed,
-            socket_open_callback=lambda: api.subscribe(tokens),
+            socket_open_callback=_on_open,
         )
         # Wait up to 3 seconds for all ticks to arrive
         all_done.wait(timeout=3.0)
