@@ -9,6 +9,13 @@ Canonical data-ingestion engine for [Mosaic Fund Agent](https://github.com/Mosai
 4. **Price Authority**: Indian equity/ETF prices must use Shoonya or NSE. Never use Yahoo Finance or static NAV for secondary Indian ETF prices.
 5. **iNAV Precedence**: Use live AMC iNAV for ETF premium/discount. Never use lagged/static NSE EOD declared NAV.
 
+## Supported Sources & AMCs
+- **17 AMCs**: DSP, ICICI (MF & Index), Nippon, HDFC, Kotak, Bajaj, Quant, QSIF, Edelweiss, Abakkus, Helios, Invesco, Canara Robeco, Mirae, Axis, Motilal, Altiva SIF ([docs/amc-factory.md](docs/amc-factory.md)).
+- **Upstream Sources**: Shoonya (Finvasia), NSE (Direct/Bhavcopy/iNAV), StockScans (REST + Private JWT), Sensibull, MFAPI.in, Morningstar, CFTC, IMF, World Bank, RBI/MOSPI, Yahoo Finance ([docs/clickhouse.md](docs/clickhouse.md)).
+- **Dynamic Discovery**:
+  - `python -c "from data_importer.fetchers.adapters import get_registry; print(list(get_registry()))"`
+  - `python -c "from data_importer.amc_holdings.factory import REGISTRY; print(list(REGISTRY))"`
+
 ## CLI Quick Reference
 ```bash
 python -m data_importer.cli --category <cat> [--lookback <days>] [--dry-run]
