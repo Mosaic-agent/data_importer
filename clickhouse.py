@@ -767,6 +767,106 @@ PARTITION BY toYYYYMM(alert_timestamp)
 ORDER BY (symbol, alert_timestamp)
 """
 
+_DDL_STOCK_FINANCIAL_STATEMENTS = """
+CREATE TABLE IF NOT EXISTS market_data.stock_financial_statements (
+    symbol              String,
+    statement_type      LowCardinality(String),   -- quarterly | yearly
+    period_date         String,                   -- e.g. '202606', '202512'
+    revenue             Float64,
+    revenue_growth_yoy  Float64,
+    operating_profit    Float64,
+    opm                 Float64,
+    other_income        Float64,
+    interest            Float64,
+    depreciation        Float64,
+    pbt                 Float64,
+    tax                 Float64,
+    pat                 Float64,
+    pat_growth_yoy      Float64,
+    npm                 Float64,
+    eps                 Float64,
+    book_value          Float64,
+    source              LowCardinality(String) DEFAULT 'stockscans',
+    imported_at         DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(imported_at)
+ORDER BY (symbol, statement_type, period_date)
+"""
+
+_DDL_IPO_PIPELINE = """
+CREATE TABLE IF NOT EXISTS market_data.ipo_pipeline (
+    company_key         String,
+    symbol              String,
+    slug                String,
+    name                String,
+    sector              String,
+    board               LowCardinality(String),   -- mainboard | sme
+    stage               LowCardinality(String),   -- open | upcoming | closed | listed
+    open_date           Nullable(Date),
+    close_date          Nullable(Date),
+    allotment_date      Nullable(Date),
+    listing_date        Nullable(Date),
+    price_band_low      Float64,
+    price_band_high     Float64,
+    lot_size            UInt32,
+    min_investment      Float64,
+    issue_size_cr       Float64,
+    sub_qib             Float64,
+    sub_nii             Float64,
+    sub_retail          Float64,
+    sub_total           Float64,
+    imported_at         DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(imported_at)
+ORDER BY (slug, stage)
+"""
+
+_DDL_CONCALL_SCHEDULES = """
+CREATE TABLE IF NOT EXISTS market_data.concall_schedules (
+    company_key         String,
+    symbol              String,
+    company_name        String,
+    call_time           Nullable(DateTime),
+    status              LowCardinality(String),   -- scheduled | completed
+    imported_at         DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(imported_at)
+ORDER BY (company_key, symbol)
+"""
+
+_DDL_STOCK_SHAREHOLDING_PATTERN = """
+CREATE TABLE IF NOT EXISTS market_data.stock_shareholding_pattern (
+    symbol              String,
+    quarter_date        Date,
+    quarter_str         String,
+    promoter_pct        Float64 DEFAULT 0.0,
+    fii_pct             Float64 DEFAULT 0.0,
+    dii_pct             Float64 DEFAULT 0.0,
+    government_pct      Float64 DEFAULT 0.0,
+    public_pct          Float64 DEFAULT 0.0,
+    no_of_shareholders  UInt64 DEFAULT 0,
+    source              LowCardinality(String) DEFAULT 'stockscans',
+    imported_at         DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(imported_at)
+ORDER BY (symbol, quarter_date)
+"""
+
+_DDL_STOCK_SHAREHOLDING_ENTITIES = """
+CREATE TABLE IF NOT EXISTS market_data.stock_shareholding_entities (
+    symbol              String,
+    category            LowCardinality(String),   -- promoter | public
+    holder_name         String,
+    quarter_date        Date,
+    quarter_str         String,
+    holding_pct         Float64,
+    source              LowCardinality(String) DEFAULT 'stockscans',
+    imported_at         DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(imported_at)
+ORDER BY (symbol, category, holder_name, quarter_date)
+"""
+
 
 class ClickHouseImporter:
     """
@@ -834,6 +934,8 @@ class ClickHouseImporter:
             _DDL_LIVE_QUOTES, _DDL_LIVE_ALERTS, _DDL_AMFI_CATEGORY_FLOWS,
             _DDL_BULK_BLOCK_DEALS,
             _DDL_MF_HOLDING_SUMMARIES, _DDL_MV_MF_HOLDING_SUMMARIES,
+            _DDL_STOCK_FINANCIAL_STATEMENTS, _DDL_IPO_PIPELINE, _DDL_CONCALL_SCHEDULES,
+            _DDL_STOCK_SHAREHOLDING_PATTERN, _DDL_STOCK_SHAREHOLDING_ENTITIES,
         ):
             self._client.command(ddl)
         # Column migrations: ADD COLUMN IF NOT EXISTS / MODIFY COLUMN (all idempotent)
@@ -1868,6 +1970,8 @@ class ClickHouseImporter:
         )
         return len(rows)
 
+    insert_stock_insider_trades = insert_stock_insider
+
     def insert_stock_valuation(self, rows: list[dict[str, Any]]) -> int:
         if not rows:
             return 0
@@ -1931,6 +2035,94 @@ class ClickHouseImporter:
             int(r.get("delivered_to_whatsapp", 0)),
         ] for r in rows]
         self._client.insert("market_data.live_alerts", data, column_names=cols)
+        return len(rows)
+
+    def insert_stock_financial_statements(self, rows: list[dict[str, Any]]) -> int:
+        if not rows:
+            return 0
+        cols = [
+            "symbol", "statement_type", "period_date", "revenue", "revenue_growth_yoy",
+            "operating_profit", "opm", "other_income", "interest", "depreciation",
+            "pbt", "tax", "pat", "pat_growth_yoy", "npm", "eps", "book_value", "source",
+        ]
+        data = [[
+            r["symbol"], r["statement_type"], str(r["period_date"]),
+            float(r.get("revenue") or 0.0), float(r.get("revenue_growth_yoy") or 0.0),
+            float(r.get("operating_profit") or 0.0), float(r.get("opm") or 0.0),
+            float(r.get("other_income") or 0.0), float(r.get("interest") or 0.0),
+            float(r.get("depreciation") or 0.0), float(r.get("pbt") or 0.0),
+            float(r.get("tax") or 0.0), float(r.get("pat") or 0.0),
+            float(r.get("pat_growth_yoy") or 0.0), float(r.get("npm") or 0.0),
+            float(r.get("eps") or 0.0), float(r.get("book_value") or 0.0),
+            r.get("source", "stockscans"),
+        ] for r in rows]
+        self._client.insert("market_data.stock_financial_statements", data, column_names=cols)
+        return len(rows)
+
+    def insert_ipo_pipeline(self, rows: list[dict[str, Any]]) -> int:
+        if not rows:
+            return 0
+        cols = [
+            "company_key", "symbol", "slug", "name", "sector", "board", "stage",
+            "open_date", "close_date", "allotment_date", "listing_date",
+            "price_band_low", "price_band_high", "lot_size", "min_investment",
+            "issue_size_cr", "sub_qib", "sub_nii", "sub_retail", "sub_total",
+        ]
+        data = [[
+            r.get("company_key", ""), r.get("symbol", ""), r["slug"], r.get("name", ""),
+            r.get("sector", ""), r.get("board", "mainboard"), r.get("stage", "upcoming"),
+            r.get("open_date"), r.get("close_date"), r.get("allotment_date"), r.get("listing_date"),
+            float(r.get("price_band_low") or 0.0), float(r.get("price_band_high") or 0.0),
+            int(r.get("lot_size") or 0), float(r.get("min_investment") or 0.0),
+            float(r.get("issue_size_cr") or 0.0), float(r.get("sub_qib") or 0.0),
+            float(r.get("sub_nii") or 0.0), float(r.get("sub_retail") or 0.0),
+            float(r.get("sub_total") or 0.0),
+        ] for r in rows]
+        self._client.insert("market_data.ipo_pipeline", data, column_names=cols)
+        return len(rows)
+
+    def insert_concall_schedules(self, rows: list[dict[str, Any]]) -> int:
+        if not rows:
+            return 0
+        cols = ["company_key", "symbol", "company_name", "call_time", "status"]
+        data = [[
+            r.get("company_key", ""), r.get("symbol", ""), r.get("company_name", ""),
+            r.get("call_time"), r.get("status", "scheduled"),
+        ] for r in rows]
+        self._client.insert("market_data.concall_schedules", data, column_names=cols)
+        return len(rows)
+
+    def insert_stock_shareholding_pattern(self, rows: list[dict[str, Any]]) -> int:
+        if not rows:
+            return 0
+        cols = [
+            "symbol", "quarter_date", "quarter_str", "promoter_pct",
+            "fii_pct", "dii_pct", "government_pct", "public_pct",
+            "no_of_shareholders", "source",
+        ]
+        data = [[
+            r["symbol"], r["quarter_date"], str(r.get("quarter_str", "")),
+            float(r.get("promoter_pct") or 0.0), float(r.get("fii_pct") or 0.0),
+            float(r.get("dii_pct") or 0.0), float(r.get("government_pct") or 0.0),
+            float(r.get("public_pct") or 0.0), int(r.get("no_of_shareholders") or 0),
+            r.get("source", "stockscans"),
+        ] for r in rows]
+        self._client.insert("market_data.stock_shareholding_pattern", data, column_names=cols)
+        return len(rows)
+
+    def insert_stock_shareholding_entities(self, rows: list[dict[str, Any]]) -> int:
+        if not rows:
+            return 0
+        cols = [
+            "symbol", "category", "holder_name", "quarter_date",
+            "quarter_str", "holding_pct", "source",
+        ]
+        data = [[
+            r["symbol"], r.get("category", "public"), str(r.get("holder_name", "")),
+            r["quarter_date"], str(r.get("quarter_str", "")),
+            float(r.get("holding_pct") or 0.0), r.get("source", "stockscans"),
+        ] for r in rows]
+        self._client.insert("market_data.stock_shareholding_entities", data, column_names=cols)
         return len(rows)
 
     def close(self) -> None:

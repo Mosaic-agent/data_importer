@@ -79,6 +79,7 @@ STOCKS: list[tuple[str, str]] = [
     ("CHOLAFIN",    "CHOLAFIN.NS"),      # Cholamandalam Investment & Finance (Murugappa)
     ("ALKYLAMINE",  "ALKYLAMINE.NS"),    # Alkyl Amines Chemicals — specialty amines
     ("BECTORFOOD",  "BECTORFOOD.NS"),    # Mrs. Bectors Food Specialities Limited
+    ("GODIGIT",     "GODIGIT.NS"),       # Go Digit General Insurance Limited
 ]
 
 ETFS: list[tuple[str, str]] = [
@@ -88,6 +89,7 @@ ETFS: list[tuple[str, str]] = [
     ("LIQUIDBEES",  "LIQUIDBEES.NS"),
     ("BANKBEES",    "BANKBEES.NS"),
     ("PSUBNKBEES",  "PSUBNKBEES.NS"),
+    ("ITBEES",      "ITBEES.NS"),
     ("SILVERBEES",  "SILVERBEES.NS"),
     ("HNGSNGBEES",  "HNGSNGBEES.NS"),
     ("MAFANG",      "MAFANG.NS"),
@@ -289,6 +291,9 @@ ALL_CATEGORIES = list(CATEGORY_MAP.keys()) + [
     "mf", "inav", "nse_eod", "cot", "cb_reserves", "etf_aum", "mf_holdings",
     "fii_dii", "amfi_flows", "bulk_deals", "events", "earnings", "insider", "valuation",
     "fundamentals", "stock_fundamentals",
+    # StockScans Indian equity intelligence (fundamentals, statements, IPO, concalls, insider, shareholding)
+    "stockscans", "stockscans_fundamentals", "stockscans_ipo", "stockscans_concalls", "stockscans_insider",
+    "stockscans_shareholding", "shareholding_pattern", "shareholding", "ipo", "concalls",
     # Macro fundamentals (annual, free public APIs — no auth required)
     "world_bank", "imf_weo", "indian_macro", "indian_macro_indicators",
     # AMC fund-holdings importers (factory pattern in src/scripts/fund_imports/)
