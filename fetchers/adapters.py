@@ -874,6 +874,118 @@ class BulkBlockDealsFetcher(Fetcher):
         return max(r["deal_date"] for r in rows)
 
 
+# ── StockScans Indian Equity Intelligence & Fundamentals ────────────────────
+
+class StockScansFetcher(Fetcher):
+    """
+    StockScans.in data fetcher for Indian equity fundamentals and market intelligence.
+
+    Supports datasets:
+      - 'all': Statements, valuations, IPO pipeline, and concalls
+      - 'fundamentals': Financial statements (P&L, Balance Sheet, Cash Flow) & valuation snapshots
+      - 'ipo': Mainboard & SME IPO pipeline with subscription status
+      - 'concalls': Scheduled & upcoming earnings conference calls
+    """
+    source_name  = "stockscans"
+    symbol_key   = "NSE"
+    overlap_days = 0
+    supports_parallel = False
+    supports_source_override = False
+
+    def __init__(
+        self,
+        category: str = "stockscans",
+        dataset: str = "all",
+        symbols: list[tuple[str, str] | str] | None = None,
+    ) -> None:
+        self.category    = category
+        self.dataset     = dataset
+        self.description = f"StockScans {dataset.title()} ({category})"
+        self.symbols     = symbols if symbols is not None else []
+
+    def fetch(self, from_date: date, to_date: date, *, source: str | None = None) -> list[dict[str, Any]]:
+        from src.data_importer.fetchers.stockscans_fetcher import (
+            fetch_stockscans_fundamentals,
+            fetch_stockscans_ipos,
+            fetch_stockscans_concalls,
+        )
+        from src.data_importer.registry import STOCKS
+
+        target_symbols = self.symbols or STOCKS
+        rows: list[dict[str, Any]] = []
+
+        if self.dataset in ("all", "fundamentals"):
+            val_rows, stmt_rows = fetch_stockscans_fundamentals(target_symbols)
+            rows.extend(val_rows)
+            rows.extend(stmt_rows)
+
+        if self.dataset in ("all", "ipo"):
+            ipo_rows = fetch_stockscans_ipos()
+            rows.extend(ipo_rows)
+
+        if self.dataset in ("all", "concalls"):
+            concall_rows = fetch_stockscans_concalls(days_ahead=30)
+            rows.extend(concall_rows)
+
+        if self.dataset in ("all", "insider"):
+            from src.data_importer.fetchers.stockscans_fetcher import fetch_stockscans_insider_trades
+            insider_rows = fetch_stockscans_insider_trades(target_symbols)
+            rows.extend(insider_rows)
+
+        if self.dataset in ("all", "shareholding"):
+            from src.data_importer.fetchers.stockscans_fetcher import fetch_stockscans_shareholding_patterns
+            p_rows, e_rows = fetch_stockscans_shareholding_patterns(target_symbols)
+            rows.extend(p_rows)
+            rows.extend(e_rows)
+
+        return rows
+
+    def insert(self, rows: list[dict], ch) -> int:
+        by_ds: dict[str, list[dict]] = {
+            "valuation": [],
+            "statements": [],
+            "ipo": [],
+            "concalls": [],
+            "insider": [],
+            "shareholding_pattern": [],
+            "shareholding_entities": [],
+        }
+        for r in rows:
+            ds = r.get("_dataset", "")
+            if ds in by_ds:
+                by_ds[ds].append(r)
+
+        n = 0
+        if by_ds["valuation"]:
+            n += ch.insert_stock_valuation(by_ds["valuation"])
+            log.info("StockScans: inserted %d stock valuation rows", len(by_ds["valuation"]))
+        if by_ds["statements"]:
+            n += ch.insert_stock_financial_statements(by_ds["statements"])
+            log.info("StockScans: inserted %d financial statement rows", len(by_ds["statements"]))
+        if by_ds["ipo"]:
+            n += ch.insert_ipo_pipeline(by_ds["ipo"])
+            log.info("StockScans: inserted %d IPO pipeline rows", len(by_ds["ipo"]))
+        if by_ds["concalls"]:
+            n += ch.insert_concall_schedules(by_ds["concalls"])
+            log.info("StockScans: inserted %d concall schedule rows", len(by_ds["concalls"]))
+        if by_ds["insider"]:
+            n += ch.insert_stock_insider(by_ds["insider"])
+            log.info("StockScans: inserted %d insider trade rows", len(by_ds["insider"]))
+        if by_ds["shareholding_pattern"]:
+            n += ch.insert_stock_shareholding_pattern(by_ds["shareholding_pattern"])
+            log.info("StockScans: inserted %d shareholding pattern rows", len(by_ds["shareholding_pattern"]))
+        if by_ds["shareholding_entities"]:
+            n += ch.insert_stock_shareholding_entities(by_ds["shareholding_entities"])
+            log.info("StockScans: inserted %d shareholding entity rows", len(by_ds["shareholding_entities"]))
+        return n
+
+    def validate(self, rows: list[dict]) -> list[dict]:
+        return [r for r in rows if r.get("_dataset")]
+
+    def max_date(self, rows: list[dict]) -> date:
+        return date.today()
+
+
 # ── Registry ──────────────────────────────────────────────────────────────────
 # Maps CLI category name → Fetcher instance.
 # The orchestrator loops over this — adding a new source = one line here.
@@ -901,6 +1013,16 @@ def _build_registry() -> dict[str, Fetcher]:
 
     registry["fundamentals"]       = StocksFetcher("stocks", STOCKS, include_fundamentals=True, fundamentals_only=True)
     registry["stock_fundamentals"] = StocksFetcher("stocks", STOCKS, include_fundamentals=True, fundamentals_only=True)
+    registry["stockscans"]              = StockScansFetcher(category="stockscans", dataset="all")
+    registry["stockscans_fundamentals"] = StockScansFetcher(category="stockscans_fundamentals", dataset="fundamentals")
+    registry["stockscans_ipo"]          = StockScansFetcher(category="stockscans_ipo", dataset="ipo")
+    registry["stockscans_concalls"]     = StockScansFetcher(category="stockscans_concalls", dataset="concalls")
+    registry["stockscans_insider"]      = StockScansFetcher(category="stockscans_insider", dataset="insider")
+    registry["stockscans_shareholding"] = StockScansFetcher(category="stockscans_shareholding", dataset="shareholding")
+    registry["shareholding_pattern"]    = StockScansFetcher(category="shareholding_pattern", dataset="shareholding")
+    registry["shareholding"]            = StockScansFetcher(category="shareholding", dataset="shareholding")
+    registry["ipo"]                     = StockScansFetcher(category="ipo", dataset="ipo")
+    registry["concalls"]                = StockScansFetcher(category="concalls", dataset="concalls")
     registry["nse_indices"] = NseIndexFetcher(NSE_ONLY_INDICES)
     registry["nse_eod"]      = NseEodFetcher(ETFS, STOCKS)
     registry["indian_macro"] = IndianMacroFetcher()

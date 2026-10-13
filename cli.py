@@ -133,11 +133,7 @@ def run_import(
     repo = MarketDataRepository(pool=None)
     registry_categories = [
         c for c in categories
-        if c in {"stocks", "us_stocks", "etfs", "commodities", "indices",
-                 "nse_indices", "nse_eod", "indian_macro", "fx_rates",
-                 "cot", "cb_reserves", "etf_aum", "mf", "fii_dii",
-                 "world_bank", "imf_weo", "amfi_flows", "nse_delivery",
-                 "bulk_deals", "events", "fundamentals", "stock_fundamentals"}
+        if c in get_registry()
     ]
     for category in registry_categories:
         fetcher = get_registry().get(category)
@@ -148,7 +144,7 @@ def run_import(
         if include_fundamentals and hasattr(fetcher, "include_fundamentals"):
             fetcher.include_fundamentals = True
 
-        symbol_list = getattr(fetcher, "symbols", [])
+        symbol_list = getattr(fetcher, "symbols", []) or []
         console.print(
             f"\n[bold cyan]▶ {category.upper()}[/bold cyan]"
             + (f" ({len(symbol_list)} symbols)" if symbol_list else "")
