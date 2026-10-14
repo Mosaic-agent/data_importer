@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "add_fetcher",
+      "prompt": "Add a registry-backed data fetcher safely.",
+      "required_reads": ["docs/adding-fetchers.md", "docs/architecture.md"],
+      "required_evidence": ["dry_run"]
+    },
+    {
+      "id": "repair_delta_import",
+      "prompt": "Diagnose and repair a duplicate-safe delta import.",
+      "required_reads": ["docs/clickhouse.md"],
+      "required_evidence": ["final_query", "watermark_check"]
+    },
+    {
+      "id": "validate_amc_importer",
+      "prompt": "Validate a changed AMC holdings importer before release.",
+      "required_reads": ["docs/amc-factory.md", "docs/testing.md"],
+      "required_evidence": ["dry_run", "test_run"]
+    }
+  ]
+}

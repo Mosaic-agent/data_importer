@@ -885,6 +885,9 @@ class StockScansFetcher(Fetcher):
       - 'fundamentals': Financial statements (P&L, Balance Sheet, Cash Flow) & valuation snapshots
       - 'ipo': Mainboard & SME IPO pipeline with subscription status
       - 'concalls': Scheduled & upcoming earnings conference calls
+      - 'peer_valuation': Single-symbol peer comparison matrix (/api/company/peers) —
+        requires `symbols=[anchor_symbol]` (exactly one), unlike the other
+        datasets which operate over the whole stock universe.
     """
     source_name  = "stockscans"
     symbol_key   = "NSE"
@@ -915,7 +918,7 @@ class StockScansFetcher(Fetcher):
         rows: list[dict[str, Any]] = []
 
         if self.dataset in ("all", "fundamentals"):
-            val_rows, stmt_rows = fetch_stockscans_fundamentals(target_symbols)
+            val_rows, stmt_rows = fetch_stockscans_fundamentals(target_symbols, max_workers=4)
             rows.extend(val_rows)
             rows.extend(stmt_rows)
 
@@ -929,14 +932,25 @@ class StockScansFetcher(Fetcher):
 
         if self.dataset in ("all", "insider"):
             from src.data_importer.fetchers.stockscans_fetcher import fetch_stockscans_insider_trades
-            insider_rows = fetch_stockscans_insider_trades(target_symbols)
+            insider_rows = fetch_stockscans_insider_trades(target_symbols, max_workers=4)
             rows.extend(insider_rows)
 
         if self.dataset in ("all", "shareholding"):
             from src.data_importer.fetchers.stockscans_fetcher import fetch_stockscans_shareholding_patterns
-            p_rows, e_rows = fetch_stockscans_shareholding_patterns(target_symbols)
+            p_rows, e_rows = fetch_stockscans_shareholding_patterns(target_symbols, max_workers=4)
             rows.extend(p_rows)
             rows.extend(e_rows)
+
+        if self.dataset == "peer_valuation":
+            from src.data_importer.fetchers.stockscans_fetcher import fetch_stockscans_peer_valuation, to_company_id
+            if len(target_symbols) != 1:
+                raise ValueError("peer_valuation dataset requires exactly one anchor symbol in `symbols`")
+            anchor = target_symbols[0][0] if isinstance(target_symbols[0], tuple) else target_symbols[0]
+            cid = to_company_id(anchor)
+            for row in fetch_stockscans_peer_valuation(cid):
+                row["_dataset"] = "peer_valuation"
+                row["anchor_symbol"] = anchor
+                rows.append(row)
 
         return rows
 
@@ -949,6 +963,7 @@ class StockScansFetcher(Fetcher):
             "insider": [],
             "shareholding_pattern": [],
             "shareholding_entities": [],
+            "peer_valuation": [],
         }
         for r in rows:
             ds = r.get("_dataset", "")
@@ -977,6 +992,22 @@ class StockScansFetcher(Fetcher):
         if by_ds["shareholding_entities"]:
             n += ch.insert_stock_shareholding_entities(by_ds["shareholding_entities"])
             log.info("StockScans: inserted %d shareholding entity rows", len(by_ds["shareholding_entities"]))
+        if by_ds["peer_valuation"]:
+            peer_rows = [
+                {
+                    "symbol": r["anchor_symbol"],
+                    "peer_symbol": r["symbol"],
+                    "snapshot_date": r["snapshot_date"],
+                    **{k: r.get(k) for k in (
+                        "market_cap", "trailing_pe", "price_to_book", "price_to_sales",
+                        "debt_to_equity", "return_on_equity", "profit_margin",
+                        "operating_margin", "gross_margin", "revenue_growth", "earnings_growth",
+                    )},
+                }
+                for r in by_ds["peer_valuation"]
+            ]
+            n += ch.insert_stock_peer_valuation(peer_rows)
+            log.info("StockScans: inserted %d peer valuation rows", len(peer_rows))
         return n
 
     def validate(self, rows: list[dict]) -> list[dict]:

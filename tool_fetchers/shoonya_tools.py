@@ -497,13 +497,37 @@ def format_order_book_ascii(data: dict[str, Any]) -> str:
 def fetch_and_calculate_obi(symbol: str) -> dict[str, Any] | None:
     """
     Fetch live or latest quote for symbol and calculate Order Book Imbalance.
-    First checks Shoonya REST API; falls back to ClickHouse market_data.live_quotes.
+    Checks ClickHouse market_data.live_quotes first if outside market hours or if local quote exists;
+    queries Shoonya REST API during live market hours.
     """
-    from src.data_importer.fetchers.shoonya_fetcher import get_shoonya_api
-    api = get_shoonya_api()
+    from src.utils.ist import is_market_hours
     clean_sym = symbol.strip().upper().replace(".NS", "").replace(".BO", "")
-
     quote = None
+
+    # Outside market hours: local ClickHouse live_quotes is authoritative and fast (< 2ms).
+    # If not present in ClickHouse, return None immediately rather than hitting broker when market is closed.
+    if not is_market_hours():
+        try:
+            from src.db.pool import get_pool
+            pool = get_pool()
+            ch_df = pool.query_df(f"""
+                SELECT *
+                FROM market_data.live_quotes FINAL
+                WHERE symbol = '{clean_sym}'
+                ORDER BY imported_at DESC
+                LIMIT 1
+            """)
+            if not ch_df.empty:
+                quote = ch_df.iloc[0].to_dict()
+                return calculate_order_book_imbalance(quote)
+            return None
+        except Exception as e:
+            logger.debug("Error querying ClickHouse live_quotes for %s: %s", clean_sym, e)
+            return None
+
+    # During market hours (or if local was empty): query live Shoonya REST API
+    from src.data_importer.fetchers.shoonya_fetcher import get_shoonya_api
+    api = get_shoonya_api(interactive=False)
     if api:
         res = _resolve_token(api, clean_sym)
         if res:
@@ -517,7 +541,7 @@ def fetch_and_calculate_obi(symbol: str) -> dict[str, Any] | None:
                 logger.debug("Error fetching quote for %s from Shoonya: %s", clean_sym, e)
 
     if not quote:
-        # Fallback to ClickHouse market_data.live_quotes
+        # Fallback to ClickHouse market_data.live_quotes if not attempted yet
         try:
             from src.db.pool import get_pool
             pool = get_pool()
@@ -537,6 +561,7 @@ def fetch_and_calculate_obi(symbol: str) -> dict[str, Any] | None:
         return None
 
     return calculate_order_book_imbalance(quote)
+
 
 
 @tool
