@@ -61,7 +61,7 @@ ORDER BY (symbol, record_date)
 ## Verification
 ```bash
 # Test single category with dry-run
-python -m data_importer.cli --category custom_data --dry-run
+./mosaic.sh python -m data_importer.cli --category custom_data --dry-run
 # Test live insert
-python -m data_importer.cli --category custom_data
+./mosaic.sh python -m data_importer.cli --category custom_data
 ```

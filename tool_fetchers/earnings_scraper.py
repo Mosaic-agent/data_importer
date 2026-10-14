@@ -413,5 +413,59 @@ def get_shareholding_pattern(symbol: str) -> dict:
     return {"symbol": sym, "error": "Shareholding data not found on Screener.in"}
 
 
+def fetch_screener_concall_links(symbol: str, max_quarters: int = 4) -> list[dict[str, Any]]:
+    """
+    Scrape Screener.in's "Concalls" panel for direct transcript/PPT/recording
+    links per quarter. These point at the raw BSE-hosted announcement PDF
+    (free, no auth) — NOT Screener's own paywalled "AI Summary" feature.
+
+    Args:
+        symbol:       NSE trading symbol, e.g. "RELIANCE".
+        max_quarters: How many most-recent quarters to return (Screener lists
+                      everything back to listing; most companies report
+                      quarterly, so 4 ≈ 1 year).
+
+    Returns:
+        List of dicts, newest first: {period_label, transcript_url, ppt_url,
+        rec_url}. transcript_url/ppt_url/rec_url are "" when Screener has no
+        link for that type in that quarter (common for older/smaller caps).
+    """
+    sym = symbol.strip().upper()
+    time.sleep(settings.scrape_delay_seconds)
+    rows: list[dict[str, Any]] = []
+
+    for path in (f"/company/{sym}/consolidated/", f"/company/{sym}/"):
+        try:
+            resp = requests.get(f"{SCREENER_BASE}{path}", headers=HEADERS, timeout=15)
+        except Exception as exc:
+            logger.warning("Screener.in concalls request failed for %s: %s", sym, exc)
+            continue
+        if resp.status_code != 200:
+            continue
+
+        soup = BeautifulSoup(resp.text, "lxml")
+        div = soup.find("div", class_="concalls")
+        if not div:
+            continue
+
+        for li in div.find_all("li", class_="flex")[:max_quarters]:
+            period_div = li.find("div")
+            period_label = period_div.get_text(strip=True) if period_div else ""
+            links = {a.get_text(strip=True): a.get("href", "") for a in li.find_all("a")}
+            rows.append({
+                "period_label": period_label,
+                "transcript_url": links.get("Transcript", ""),
+                "ppt_url": links.get("PPT", ""),
+                "rec_url": links.get("REC", ""),
+            })
+
+        if rows:
+            break
+
+    logger.info("Screener concalls: %d quarter(s) found for %s (%d with a transcript link)",
+                len(rows), sym, sum(1 for r in rows if r["transcript_url"]))
+    return rows
+
+
 # Convenience list
 EARNINGS_TOOLS = [get_quarterly_results, get_shareholding_pattern]

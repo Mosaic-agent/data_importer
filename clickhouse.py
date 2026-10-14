@@ -867,6 +867,42 @@ ENGINE = ReplacingMergeTree(imported_at)
 ORDER BY (symbol, category, holder_name, quarter_date)
 """
 
+_DDL_STOCK_PEER_VALUATION = """
+CREATE TABLE IF NOT EXISTS market_data.stock_peer_valuation (
+    symbol              String,            -- anchor symbol the comparison was run for
+    peer_symbol         String,            -- this row's company (anchor itself, or a peer)
+    snapshot_date       Date,
+    market_cap          Float64,
+    trailing_pe         Float64,
+    price_to_book       Float64,
+    price_to_sales      Float64,
+    debt_to_equity      Float64,
+    return_on_equity    Float64,
+    profit_margin       Float64,
+    operating_margin    Float64,
+    gross_margin        Float64,
+    revenue_growth      Float64,
+    earnings_growth     Float64,
+    source              LowCardinality(String) DEFAULT 'stockscans',
+    imported_at         DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(imported_at)
+ORDER BY (symbol, peer_symbol, snapshot_date)
+"""
+
+_DDL_CONCALL_TRANSCRIPT_INDEX = """
+CREATE TABLE IF NOT EXISTS market_data.concall_transcript_index (
+    symbol              String,
+    period_label        String,         -- e.g. "Jul 2026", as shown on Screener
+    pdf_url              String,
+    chunk_count         UInt32,
+    source              LowCardinality(String) DEFAULT 'screener_bse',
+    imported_at         DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(imported_at)
+ORDER BY (symbol, period_label)
+"""
+
 
 class ClickHouseImporter:
     """
@@ -936,6 +972,7 @@ class ClickHouseImporter:
             _DDL_MF_HOLDING_SUMMARIES, _DDL_MV_MF_HOLDING_SUMMARIES,
             _DDL_STOCK_FINANCIAL_STATEMENTS, _DDL_IPO_PIPELINE, _DDL_CONCALL_SCHEDULES,
             _DDL_STOCK_SHAREHOLDING_PATTERN, _DDL_STOCK_SHAREHOLDING_ENTITIES,
+            _DDL_STOCK_PEER_VALUATION, _DDL_CONCALL_TRANSCRIPT_INDEX,
         ):
             self._client.command(ddl)
         # Column migrations: ADD COLUMN IF NOT EXISTS / MODIFY COLUMN (all idempotent)
@@ -2123,6 +2160,38 @@ class ClickHouseImporter:
             float(r.get("holding_pct") or 0.0), r.get("source", "stockscans"),
         ] for r in rows]
         self._client.insert("market_data.stock_shareholding_entities", data, column_names=cols)
+        return len(rows)
+
+    def insert_stock_peer_valuation(self, rows: list[dict[str, Any]]) -> int:
+        if not rows:
+            return 0
+        cols = [
+            "symbol", "peer_symbol", "snapshot_date", "market_cap", "trailing_pe",
+            "price_to_book", "price_to_sales", "debt_to_equity", "return_on_equity",
+            "profit_margin", "operating_margin", "gross_margin", "revenue_growth",
+            "earnings_growth", "source",
+        ]
+        data = [[
+            r["symbol"], r["peer_symbol"], r["snapshot_date"],
+            float(r.get("market_cap") or 0.0), float(r.get("trailing_pe") or 0.0),
+            float(r.get("price_to_book") or 0.0), float(r.get("price_to_sales") or 0.0),
+            float(r.get("debt_to_equity") or 0.0), float(r.get("return_on_equity") or 0.0),
+            float(r.get("profit_margin") or 0.0), float(r.get("operating_margin") or 0.0),
+            float(r.get("gross_margin") or 0.0), float(r.get("revenue_growth") or 0.0),
+            float(r.get("earnings_growth") or 0.0), r.get("source", "stockscans"),
+        ] for r in rows]
+        self._client.insert("market_data.stock_peer_valuation", data, column_names=cols)
+        return len(rows)
+
+    def insert_concall_transcript_index(self, rows: list[dict[str, Any]]) -> int:
+        if not rows:
+            return 0
+        cols = ["symbol", "period_label", "pdf_url", "chunk_count", "source"]
+        data = [[
+            r["symbol"], r["period_label"], r.get("pdf_url", ""),
+            int(r.get("chunk_count", 0)), r.get("source", "screener_bse"),
+        ] for r in rows]
+        self._client.insert("market_data.concall_transcript_index", data, column_names=cols)
         return len(rows)
 
     def close(self) -> None:

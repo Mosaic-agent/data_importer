@@ -45,12 +45,14 @@ Each AMC importer subclasses `BaseFundImporter` (`amc_holdings/base.py`):
 
 ## Execution
 ```bash
-# Import single AMC for latest month
-python -m data_importer.amc_holdings.run dsp
+# Start with a non-writing validation run.
+./mosaic.sh python -m data_importer.amc_holdings.run dsp --dry-run
 
-# Import target month
-python -m data_importer.amc_holdings.run icici --month 2026-05
-
-# All AMCs
-python -m data_importer.amc_holdings.run all
+# Import one AMC's supported history or refresh every AMC.
+./mosaic.sh python -m data_importer.amc_holdings.run dsp
+./mosaic.sh python -m data_importer.amc_holdings.run all --refresh
 ```
+
+`run.py` has no universal `--month` option. Use only flags exposed by its CLI
+(`--from-year` for supported AMCs, `--full`, `--refresh`, `--test`), and keep
+execution inside the persistent `mosaic` service.
